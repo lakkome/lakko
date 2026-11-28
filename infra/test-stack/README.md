@@ -57,6 +57,30 @@ the server env for the web build (`VITE_LAKKO_MODERATION_ROOT_KEY`); iOS
 (`-Plakko.moderation.root.key=...`) take it by hand. A build without it says
 reporting is not available.
 
+## Key-transparency log
+
+`lakko-test-transparency` (`services/transparency`) runs the key-transparency log on
+`127.0.0.1:8087`, with no witness: roots carry no co-signature, and a client
+build pins no witness key. Discovery appends to it (`LAKKO_TRANSPARENCY_URL`,
+`LAKKO_TRANSPARENCY_APPEND_SECRET`, one variable both services read); its
+reconciler appends the identity bundles published before the log existed,
+every `LAKKO_DISCOVERY_TRANSPARENCY_RECONCILE_SECS` (default 300 s).
+`LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH=1`: every client uploads a `leaf_auth`.
+`LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST=0`: a genesis attestation lives one
+hour, so the reconciler's backfill of older bundles would be refused; the
+verifying key (`LAKKO_TRANSPARENCY_GENESIS_ATTEST_KEY`) is still written by
+`deploy.sh` from auth's JWKS.
+
+Reads only are routed: `/api/transparency/` (web, desktop) and
+`/native/transparency/` (iOS, Android), prefix stripped; the two append routes
+answer 404 from outside. The operator signing key is generated on the
+service's first boot and kept in `lakko_test_transparency`; its public half
+(`curl -s https://test.lakko.me/api/transparency/transparency/operator-key`)
+is pinned by every client build: `deploy.sh` reads it from the server for the
+web build, the desktop recipe `build-desktop-web`, iOS `project.yml` (Debug)
+and Android `build.gradle.kts` (debug) carry it. Emptying the database mints a
+new key, and every one of those pins must change.
+
 ## Layout on the server
 
 | What | Where |
@@ -65,12 +89,12 @@ reporting is not available.
 | Units | `lakko-test-<service>.service`, `lakko-test.target` (rendered from `infra/systemd` by `render-units.sh` on every deploy) |
 | Environment and secrets | `/etc/lakko-test/lakko.env` (root:lakkotest 640, generated on the server) |
 | Web Push VAPID keys | `/etc/lakko-test/vapid_private.pem` (PKCS#8, 640) and `vapid_public.b64url` (read by `deploy.sh` for the web build) |
-| Databases | `lakko_test_{auth,ds,discovery,push_gw,channels}`, user `lakko_test` |
+| Databases | `lakko_test_{auth,ds,discovery,push_gw,channels,storage,moderation,transparency}`, user `lakko_test` |
 | Blobs | `/var/lib/lakko-test/blobs` |
 | Donation methods | `/etc/lakko-test/credstore/lakko-donations.json` (root 0600), loaded by discovery as the `lakko-donations` systemd credential; `setup-server.sh` and every deploy write `{"methods":[]}` when it is absent, because a missing credential source fails the unit |
 | Web client | `/var/www/lakko-test-web` |
 | nginx | `/etc/nginx/sites-available/lakko-test` from `nginx/lakko-test.conf`; `/etc/nginx/snippets/lakko-test-security-headers.inc` from `nginx/lakko-test-security-headers.inc` |
-| Ports | services on `127.0.0.1:8081-8086,8091`, SFU signaling `127.0.0.1:7880`, SFU media UDP `43210` public |
+| Ports | services on `127.0.0.1:8081-8087,8091`, SFU signaling `127.0.0.1:7880`, SFU media UDP `43210` public |
 
 Logs: `journalctl -u lakko-test-<service>`.
 

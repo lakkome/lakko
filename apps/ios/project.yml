@@ -78,12 +78,20 @@ settings:
       # half belongs to whoever runs test.lakko.me). Release stays empty
       # until a production root exists.
       LAKKO_MODERATION_ROOT_KEY: "h1rAntknQimM7_vYMzVfXlOnSaewXXRW8nHyeIdlcNk"
+      # The TEST stack's key-transparency log (services/transparency) and its
+      # operator PUBLIC key, generated on the service's first boot
+      # (infra/test-stack/README.md, "Key-transparency log"). Release stays
+      # empty until a production log exists.
+      LAKKO_TRANSPARENCY_URL: "https://test.lakko.me/native/transparency"
+      LAKKO_TRANSPARENCY_OPERATOR_KEY: "unspsZmpC6sM1DjKphTbBH1RlhuelkunjLkEv7nWJZQ="
     Release:
       LAKKO_API_BASE_URL: ""
       LAKKO_SFU_URL: ""
       LAKKO_WEB_ORIGIN: "https://lakko.me"
       LAKKO_DONATIONS_KEY: "C1gdE39pXfY1UBeSX_mqLeNBhxw8ov9LlfnGAs2GHtM"
       LAKKO_MODERATION_ROOT_KEY: ""
+      LAKKO_TRANSPARENCY_URL: ""
+      LAKKO_TRANSPARENCY_OPERATOR_KEY: ""
 
 # Single iOS app target — `Lakko`. The SwiftUI source lives at
 # `apps/ios/Lakko/` (committed); the `Info.plist` is
@@ -191,8 +199,8 @@ targets:
         # Empty -> fetched from `/.well-known/lakko-username-cert-key` (the
         # transition posture; a pin defends a compromised serving tier).
         LakkoUsernameCertKey: ""
-        LakkoTransparencyUrl: ""
-        LakkoTransparencyOperatorKey: ""
+        LakkoTransparencyUrl: "$(LAKKO_TRANSPARENCY_URL)"
+        LakkoTransparencyOperatorKey: "$(LAKKO_TRANSPARENCY_OPERATOR_KEY)"
         LakkoTransparencyWitnessKey: ""
         LakkoTransparencyWitnessKeys: ""
         LakkoTransparencyWitnessThreshold: ""

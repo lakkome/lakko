@@ -102,9 +102,9 @@
 	<key>LakkoTranslationKey</key>
 	<string></string>
 	<key>LakkoTransparencyOperatorKey</key>
-	<string></string>
+	<string>$(LAKKO_TRANSPARENCY_OPERATOR_KEY)</string>
 	<key>LakkoTransparencyUrl</key>
-	<string></string>
+	<string>$(LAKKO_TRANSPARENCY_URL)</string>
 	<key>LakkoTransparencyWitnessKey</key>
 	<string></string>
 	<key>LakkoTransparencyWitnessKeys</key>

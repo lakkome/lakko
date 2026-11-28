@@ -118,6 +118,14 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           rewrite: (p) => p.replace(/^\/api\/gifs/, ""),
         },
+        // services/transparency defaults to 127.0.0.1:8087. Same prefix
+        // strip as the test stack's nginx `location /api/transparency/`:
+        // the root is `/api/transparency/transparency/root`.
+        "/api/transparency": {
+          target: "http://127.0.0.1:8087",
+          changeOrigin: true,
+          rewrite: (p) => p.replace(/^\/api\/transparency/, ""),
+        },
         // ADR-0099: lakko-svc-moderation defaults to 127.0.0.1:8100. Same
         // prefix strip as production nginx `location /api/moderation/`.
         "/api/moderation": {

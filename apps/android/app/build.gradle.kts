@@ -444,6 +444,20 @@ android {
                 "LAKKO_MODERATION_ROOT_KEY",
                 "\"${project.findProperty("lakko.moderation.root.key") as String? ?: "h1rAntknQimM7_vYMzVfXlOnSaewXXRW8nHyeIdlcNk"}\"",
             )
+            // The TEST stack's key-transparency log and its operator PUBLIC
+            // key, generated on the service's first boot
+            // (infra/test-stack/README.md, "Key-transparency log"). Release
+            // keeps the empty defaults above until a production log exists.
+            buildConfigField(
+                "String",
+                "LAKKO_TRANSPARENCY_URL",
+                "\"${project.findProperty("lakko.transparency.url") as String? ?: "https://test.lakko.me/native/transparency"}\"",
+            )
+            buildConfigField(
+                "String",
+                "LAKKO_TRANSPARENCY_OPERATOR_KEY",
+                "\"${project.findProperty("lakko.transparency.operator.key") as String? ?: "unspsZmpC6sM1DjKphTbBH1RlhuelkunjLkEv7nWJZQ="}\"",
+            )
         }
         release {
             endpointFields(apiDefault = "", sfuDefault = "", webOriginDefault = "https://lakko.me")

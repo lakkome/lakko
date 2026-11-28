@@ -111,6 +111,9 @@ function crossOriginEndpoints() {
   const env = readBuildEnv(CROSS_ORIGIN_ENDPOINT_VARS);
   const origins = [];
   for (const [name, raw] of Object.entries(env)) {
+    // A path on this origin (`/api/transparency` on the test stack, where
+    // the desktop host forwards it too) is covered by 'self'.
+    if (raw.startsWith("/") && !raw.startsWith("//")) continue;
     let origin;
     try {
       origin = new URL(raw).origin;

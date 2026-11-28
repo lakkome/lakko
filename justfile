@@ -523,7 +523,11 @@ dev-web:
 # bucket refills on a take and the device-link answer limit is off, as on the
 # test stack. A release build must not set either.
 build-desktop-web:
-    cd apps/web && VITE_LAKKO_PLATFORM=desktop VITE_LAKKO_SFU_URL="${VITE_LAKKO_SFU_URL:-wss://test.lakko.me/sfu}" VITE_LAKKO_DEVICE_LINK_ANSWER_LIMIT=off VITE_LAKKO_ANON_TOKEN_REFILL=on-demand npm run build
+    # The test stack's key-transparency log: the desktop host forwards
+    # /api/transparency/ to test.lakko.me; the operator PUBLIC key is the one
+    # the service generated on its first boot (infra/test-stack/README.md,
+    # "Key-transparency log").
+    cd apps/web && VITE_LAKKO_PLATFORM=desktop VITE_LAKKO_SFU_URL="${VITE_LAKKO_SFU_URL:-wss://test.lakko.me/sfu}" VITE_LAKKO_DEVICE_LINK_ANSWER_LIMIT=off VITE_LAKKO_ANON_TOKEN_REFILL=on-demand VITE_LAKKO_TRANSPARENCY_URL="${VITE_LAKKO_TRANSPARENCY_URL:-/api/transparency}" VITE_LAKKO_TRANSPARENCY_OPERATOR_KEY="${VITE_LAKKO_TRANSPARENCY_OPERATOR_KEY:-unspsZmpC6sM1DjKphTbBH1RlhuelkunjLkEv7nWJZQ=}" npm run build
     # The desktop app embeds its own copy: a browser build for the test
     # deploy writes the same `dist/` and must not end up inside the app
     # (seen 2026-11-07).

@@ -24,7 +24,7 @@ HERE="$REPO/infra/test-stack"
 DOMAIN="${LAKKO_TEST_DOMAIN:-test.lakko.me}"
 SSH_TARGET="${LAKKO_TEST_SSH:-root@$DOMAIN}"
 OUT="$REPO/target/test-stack"
-SERVICES=(auth ds storage discovery push-gw gif-proxy channels sfu obfs-proxy moderation)
+SERVICES=(auth ds storage discovery push-gw gif-proxy channels sfu obfs-proxy moderation transparency)
 
 # accept-new records the host key on first contact and still refuses a changed one.
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new)
@@ -71,6 +71,16 @@ if [[ ${SKIP_WEB:-0} != 1 ]]; then
   # Absent, the built client says reporting is not available.
   moderation_root="$(remote "grep -m1 '^LAKKO_MODERATION_ROOT_KEY=' /etc/lakko-test/lakko.env 2>/dev/null | cut -d= -f2- || true" | tr -d '[:space:]')"
   [[ -n $moderation_root ]] || log "no moderation root key on the server; reporting stays off in the web build"
+  # The key-transparency log (services/transparency): the operator PUBLIC key
+  # the service generated on its first boot, read from the server itself (never
+  # over the public route) and pinned into the build with the log's URL.
+  # Absent (the service not running yet), the built client skips the log check.
+  transparency_key="$(remote "curl -fsS -m 5 http://127.0.0.1:8087/transparency/operator-key 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"operator_pubkey_b64\"])' 2>/dev/null || true" | tr -d '[:space:]')"
+  transparency_url=/api/transparency
+  if [[ -z $transparency_key ]]; then
+    transparency_url=
+    log "no transparency operator key on the server; the web build skips the key-transparency check"
+  fi
   # The test stack turns off the device-link answer limit (5 a day on the
   # signed-in device), so sign-in tests do not run out of answers, and refills
   # an empty token bucket on demand, so a walk never stops on the pool. Limits
@@ -86,6 +96,8 @@ if [[ ${SKIP_WEB:-0} != 1 ]]; then
     VITE_LAKKO_DEVICE_LINK_ANSWER_LIMIT=off \
     VITE_LAKKO_ANON_TOKEN_REFILL=on-demand \
     VITE_LAKKO_MODERATION_ROOT_KEY="$moderation_root" \
+    VITE_LAKKO_TRANSPARENCY_URL="$transparency_url" \
+    VITE_LAKKO_TRANSPARENCY_OPERATOR_KEY="$transparency_key" \
     VITE_LAKKO_WEBPUSH_VAPID_PUBLIC_KEY_B64URL="$vapid_public" npm run build)
 fi
 
@@ -143,7 +155,7 @@ if [[ $SKIP_BACKEND != 1 ]]; then
   done
   if [[ -s /tmp/lakko-attest-jwks.json ]]; then
     attest_key="$(python3 -c 'import json,base64,sys; x=json.load(open("/tmp/lakko-attest-jwks.json"))["keys"][0]["x"]; print(base64.b64encode(base64.urlsafe_b64decode(x+"="*(-len(x)%4))).decode())')"
-    for var in LAKKO_DISCOVERY_ATTEST_KEY; do
+    for var in LAKKO_DISCOVERY_ATTEST_KEY LAKKO_TRANSPARENCY_GENESIS_ATTEST_KEY; do
       if ! grep -q "^$var=" /etc/lakko-test/lakko.env; then
         echo "$var=$attest_key" >> /etc/lakko-test/lakko.env
         echo "[deploy-test] $var written from the auth JWKS"
@@ -180,7 +192,7 @@ REMOTE
 
 log "health checks"
 failed=0
-for path in api/auth/health api/ds/health api/storage/health api/discovery/health api/push/health api/channels/health sfu/health; do
+for path in api/auth/health api/ds/health api/storage/health api/discovery/health api/push/health api/channels/health api/transparency/health sfu/health; do
   code=000
   for _ in $(seq 1 15); do
     code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "https://$DOMAIN/$path" || true)

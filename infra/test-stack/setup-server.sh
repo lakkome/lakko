@@ -24,7 +24,7 @@ TURN_URIS="${TURN_URIS:-}"
 
 ENV_DIR=/etc/lakko-test
 ENV_FILE=$ENV_DIR/lakko.env
-DBS=(auth ds discovery push_gw channels storage moderation)
+DBS=(auth ds discovery push_gw channels storage moderation transparency)
 
 id lakkotest >/dev/null 2>&1 || useradd --system --home-dir /var/lib/lakko-test --shell /usr/sbin/nologin lakkotest
 install -d -m 755 -o root -g root /opt/lakko-test /opt/lakko-test/bin
@@ -374,6 +374,38 @@ if ! grep -q '^LAKKO_STORAGE_PASS_SECRET=' $ENV_FILE; then
   echo "LAKKO_STORAGE_PASS_SECRET=$(openssl rand -hex 32)" >> $ENV_FILE
   echo "storage pass secret added to the env file"
 fi
+
+# The key-transparency log (services/transparency) arrived later: an env
+# file gains its database URL, the append secret it shares with discovery
+# (one variable, read by both), the URL discovery appends to, and the two
+# append policies. The secret is generated once and then kept. The operator
+# signing key is NOT here: the service generates it on its first boot and
+# keeps it in its database, so emptying lakko_test_transparency mints a new
+# one and every client build must pin the new public key. No witness runs on
+# the test stack (no LAKKO_TRANSPARENCY_WITNESS_*), so roots carry no
+# co-signature. The genesis-attest verifying key is written by deploy.sh
+# from auth's JWKS, like LAKKO_DISCOVERY_ATTEST_KEY.
+#
+# REQUIRE_LEAF_AUTH=1: every client uploads a leaf_auth with its identity
+# bundle, and an absent one would be an unauthorised binding.
+# REQUIRE_GENESIS_ATTEST=0: a genesis attestation lives one hour, and the
+# discovery reconciler appends the bundles published before the log existed
+# with their stored, long expired attestations; the gate would refuse all of
+# them.
+if ! grep -q '^LAKKO_TRANSPARENCY_DATABASE_URL=' $ENV_FILE; then
+  echo "LAKKO_TRANSPARENCY_DATABASE_URL=mysql://lakko_test:${DB_PASS}@127.0.0.1:3306/lakko_test_transparency" >> $ENV_FILE
+  echo "transparency database URL added to the env file"
+fi
+if ! grep -q '^LAKKO_TRANSPARENCY_APPEND_SECRET=' $ENV_FILE; then
+  echo "LAKKO_TRANSPARENCY_APPEND_SECRET=$(openssl rand -base64 32)" >> $ENV_FILE
+  echo "transparency append secret added to the env file"
+fi
+for line in \
+  LAKKO_TRANSPARENCY_URL=http://127.0.0.1:8087 \
+  LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH=1 \
+  LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST=0; do
+  grep -q "^${line%%=*}=" $ENV_FILE || echo "$line" >> $ENV_FILE
+done
 
 # ADR-0078 retired the DS push bindings: an older env file's pepper is unused
 # and removed here.

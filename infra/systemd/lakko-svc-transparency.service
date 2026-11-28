@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[Unit]
+Description=Lakko key-transparency log (CONIKS-style Merkle log, signed roots)
+Documentation=https://github.com/lakkome/lakko
+PartOf=lakko.target
+After=network-online.target mariadb.service
+Wants=network-online.target
+Requires=mariadb.service
+
+[Service]
+Type=simple
+User=lakkome
+Group=lakkome
+
+EnvironmentFile=/etc/lakko/lakko.env
+Environment=RUST_LOG=info
+Environment=LAKKO_BIND=127.0.0.1:8087
+# Read from /etc/lakko/lakko.env above:
+#   LAKKO_TRANSPARENCY_DATABASE_URL   - this service's own database
+#   LAKKO_TRANSPARENCY_APPEND_SECRET  - base64, >= 16 bytes; the same value
+#                                       discovery presents on append (unset:
+#                                       append answers 503, reads stay open)
+#   LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH, _REQUIRE_GENESIS_ATTEST,
+#   _GENESIS_ATTEST_KEY, _WITNESS_URLS / _COSIGN_SECRETS (optional)
+# The operator signing key is generated on first boot and kept in the
+# database; LAKKO_TRANSPARENCY_OPERATOR_SEED_HEX is a dev / e2e override and
+# must not be set here.
+#
+# Migrations are embedded into the binary at compile time via
+# `sqlx::migrate!("./migrations")` in src/main.rs.
+
+ExecStart=/usr/local/bin/lakko-svc-transparency
+Restart=on-failure
+RestartSec=5s
+
+# --- Security hardening ----------------------------------------------------
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=lakko.target

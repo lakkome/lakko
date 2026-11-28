@@ -43,6 +43,8 @@ const SERVICES: &[&str] = &[
     "push",
     "channels",
     "gifs",
+    "transparency",
+    "moderation",
 ];
 
 /// Signed static files on the Lakko origin the web client fetches from its
@@ -397,6 +399,8 @@ mod tests {
     fn only_known_services_are_forwarded() {
         assert_eq!(api_service("/api/ds/group/ab/messages"), Some("ds"));
         assert_eq!(api_service("/api/auth"), Some("auth"));
+        assert_eq!(api_service("/api/transparency/transparency/root"), Some("transparency"));
+        assert_eq!(api_service("/api/moderation/moderation/report"), Some("moderation"));
         assert_eq!(api_service("/api/evil/x"), None);
         assert_eq!(api_service("/apix/ds/"), None);
         assert_eq!(api_service("/"), None);
