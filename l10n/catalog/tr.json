@@ -8090,11 +8090,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "Kimlik doğrulayıcı kodu giriş yapmanızı sağlar. Bu hesabın daha önce hiç bulunmadığı bir cihazda, ardından yine de başka bir cihaza, bir geçiş anahtarına veya kurtarma ifadenize ihtiyacınız olur.",
+      "text": "Bunlar giriş yapmanızı sağlar. Bu hesabın daha önce hiç bulunmadığı bir cihazda, ardından yine de başka bir cihaza, bir geçiş anahtarına veya kurtarma ifadenize ihtiyacınız olur.",
       "status": "machine"
     },
     "recovery.access_only_note_words": {
-      "text": "Üç kelime veya kimlik doğrulayıcı kodu giriş yapmanızı sağlar. Bu hesabın daha önce hiç bulunmadığı bir cihazda başka bir cihaza, bir geçiş anahtarına veya kurtarma ifadenize ihtiyacınız olur.",
+      "text": "Bunlar giriş yapmanızı sağlar. Bu hesabın daha önce hiç bulunmadığı bir cihazda, ardından yine de başka bir cihaza, bir geçiş anahtarına veya kurtarma ifadenize ihtiyacınız olur.",
       "status": "machine"
     },
     "recovery.cached_account": {

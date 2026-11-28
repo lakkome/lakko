@@ -131,6 +131,10 @@ struct ContactDetailScreen: View {
         // person the viewer removed is not a contact: their card offers `Add
         // to contacts` in place of Rename and Remove (amended 2026-10-24).
         let isBlocked = blocks.isBlocked(contact.request.fromPubkey)
+        // UX 16.11 — a key an unsealed reset left behind: that account no
+        // longer exists. Its card is built as for a conversation this device
+        // is out of (no Call; Delete chat), and offers no `Add to contacts`.
+        let keyStartedOver = PeerPinStore().isStartedOverKey(base64Encode(contact.request.fromPubkey))
         // ADR-0098 — a deleted account's card: Open chat and Delete chat
         // while a one-to-one exists, Remove contact while on the list, and
         // nothing else (no call, no safety number, no rename, no add, no
@@ -139,14 +143,13 @@ struct ContactDetailScreen: View {
             ? deletedPersonInfoSections(hasOneToOne: chat != nil, isContact: isContact)
             : SuspendedInfo.withoutSending(personInfoSections(
                 caps: PersonInfoCapabilities(
-                    membershipEnded: chat.map { viewModel.membershipEnded(groupIdHex: $0) } ?? false,
+                    membershipEnded: StartedOverCard.membershipEnded(
+                        chatEnded: chat.map { viewModel.membershipEnded(groupIdHex: $0) } ?? false,
+                        keyStartedOver: keyStartedOver),
                     isContact: isContact,
                     contactsOfContactsOn: reach.setting.mode == .some && reach.setting.contactsOfContacts,
                     isBlocked: isBlocked)), suspended: accountSuspended)
-        // UX 16.11 — a key an unsealed reset left behind: that account no
-        // longer exists, so its card offers no `Add to contacts`.
-        let sections = StartedOverCard.sections(
-            ruled, keyStartedOver: PeerPinStore().isStartedOverKey(base64Encode(contact.request.fromPubkey)))
+        let sections = StartedOverCard.sections(ruled, keyStartedOver: keyStartedOver, hasChat: chat != nil)
         List {
             Section {
                 VStack(spacing: 8) {

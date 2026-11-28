@@ -9,9 +9,10 @@ import SwiftUI
 ///
 ///   - "Brings back your chats": another device (first), a passkey, the
 ///     12-word recovery phrase.
-///   - "Signs you in on this device": three words from the phrase (only on a
+///   - "Logs you in on this device": three words from the phrase (only on a
 ///     device that holds the phrase and the keys of its cached account), an
-///     authenticator code.
+///     authenticator code, an email code (a mailed code gives a new password
+///     and never brings keys back).
 ///
 /// Every method's logic is ``RecoverViewModel``; the screen only presents it.
 public struct RecoverScreen: View {
@@ -40,9 +41,6 @@ public struct RecoverScreen: View {
                 title: l10n.t("recovery.title"),
                 subtitle: l10n.t("recovery.lede"))
 
-            // UX 19.3 — the email code first, above both groups: what it
-            // brings depends on the account.
-            group(titleKey: nil, methods: viewModel.topMethods)
             group(titleKey: "recovery.group.keys", methods: viewModel.keysMethods)
             group(titleKey: "recovery.group.signin", methods: viewModel.signInMethods)
 

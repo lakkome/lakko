@@ -82,10 +82,12 @@ Choose how.
              device checks them.
   [shield]   Authenticator code             >
              A code from your authenticator app.
+  [mail]     Email code                     >
+             A code sent to your recovery email.
 
-Three words or an authenticator code sign you in. On a device
-that has never held this account you need another device, a
-passkey or your recovery phrase.
+These log you in. On a device that has never held this account
+you then still need another device, a passkey or your recovery
+phrase.
 
 Remembered your password? Log in
 ```
@@ -93,6 +95,12 @@ Remembered your password? Log in
 Rules:
 
 - **Another device is first** and carries "if you have one".
+- **Email code is the last row of the sign-in group** (2026-11-28). It
+  used to stand above both groups with no heading, which on the walk of
+  2026-11-28 read as part of "Brings back your chats"; since the email vault
+  was removed (ADR-0075, amended 2026-11-26) a mailed code gives a new
+  password and signs the person in, and brings no keys. Order in the group:
+  three words (when offered), authenticator code, email code.
 - **No row depends on server state.** Before a session the server must not
   say whether an account has other devices, a passkey or an authenticator,
   so those rows are never hidden, greyed or badged.
@@ -100,8 +108,9 @@ Rules:
   be absent: it is shown only when this device holds the phrase and the keys
   for its saved account and that account has a username. On every other
   device (a new phone, a cleared browser, a guest account) the row is not in
-  the list and the note under it reads "An authenticator code signs you in.
-  On a device that has never held this account you then still need another
+  the list. The note under the list reads the same either way (2026-11-28,
+  since the email code joined the sign-in group): "These log you in. On a
+  device that has never held this account you then still need another
   device, a passkey or your recovery phrase."
 - The two group labels are plain text headings, not collapsible.
 - The note under the list is always visible; it is the one place the screen
@@ -3074,8 +3083,10 @@ will not be enough."
 
 ### 19.3 Getting back in with the code
 
-Entry point: **Get back in** (section 2) gains one row, first in the list
-above both groups, since what it brings depends on the account:
+Entry point: **Get back in** (section 2) gains one row, the last row of the
+sign-in group (2026-11-28; it stood first, above both groups, while a code
+could bring the keys of an account with no saved phrase, which ended with the
+email vault on 2026-11-26):
 
 ```
   [mail]     Email code                     >

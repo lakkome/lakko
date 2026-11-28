@@ -752,6 +752,8 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       establishedContactOfAccount(accepted, groupIdHex(fromAccountId), {
         pinKeysB64: pinKeysOf(accountKeysOf(fromAccountIdB64, accountIdB64)),
         bindingKeyB64: readVerifiedBinding(fromAccountIdB64, accountIdB64)?.keyB64 ?? null,
+        // UX 16.11: the row of the started-over account is not this account.
+        leftBehindKeysB64: readPin(fromAccountIdB64, accountIdB64)?.startedOverKeysB64 ?? [],
       }) ?? contactSignedBy(accepted, base64Encode(request.fromPubkey));
     if (known === undefined) {
       // UX 16.11 - not a contact here, but this device pins the account
@@ -937,6 +939,14 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     const fromAccountId = request.fromAccountId;
     if (identity === null || answer === null || fromAccountId === null) return false;
     const keyB64 = base64Encode(request.fromPubkey);
+    // UX 16.11 (walk of 2026-11-28): the request may come from the new
+    // account of a contact who started over. A live answer of this account's
+    // own link accepts it as it would a stranger's: the key this device
+    // trusts for the account moves to the request's (a no-op unless a
+    // pending started-over record names exactly that key), so the founding
+    // below passes the identity check. The old row and its closed one-to-one
+    // stay as they are; the new contact is a row of its own.
+    client.adoptStartedOverRequest(fromAccountId, request.fromPubkey);
     const contact: AcceptedContactRow = {
       signaturePubkeyB64: keyB64,
       displayName: loadAccepted(accountIdB64).find((c) => c.signaturePubkeyB64 === keyB64)?.displayName ?? "",

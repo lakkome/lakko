@@ -815,16 +815,17 @@ describe("the person accepts the new account (UX 16.11)", () => {
     expect(pin?.resetSignedAtMs).toBeUndefined();
     expect(loadSupersededKeys().size).toBe(0);
     expect(accepted).toEqual([]);
-    // The old conversation stays closed, and keeps the person's name.
+    // The old conversation stays closed, and keeps its own row (walk of
+    // 2026-11-28): the old row is not touched and never named by the new key.
     expect(loadStartedOverKeys().get(original.sig)).toBe(ACCOUNT_B64);
-    expect(loadKeyAliases().get(original.sig)).toBe(fresh.sig);
-    // One row, under the new key, with its rename; the old chat link and
-    // the "an older one-to-one is still theirs" alias are gone.
+    expect(loadKeyAliases().has(original.sig)).toBe(false);
     const rows = loadAccepted();
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ signaturePubkeyB64: fresh.sig, displayName: "Anna" });
-    expect(rows[0]?.groupIdB64).toBeUndefined();
-    expect(rows[0]?.previousSignaturePubkeysB64 ?? []).not.toContain(original.sig);
+    expect(rows[0]).toMatchObject({
+      signaturePubkeyB64: original.sig,
+      displayName: "Anna",
+      groupIdB64: "b2xkLWNoYXQ=",
+    });
     // From here the published key is the pin: the gate passes.
     await expect(gate(resetBundle(fresh))).resolves.toBeUndefined();
     expect(accepted).toEqual([]);

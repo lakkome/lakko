@@ -195,6 +195,12 @@ public data class OwedEnd(
     /** When this device recorded the end (unix ms): orders the notices, since
      *  the store hands rows back in no order. `0` on a row stored before. */
     val recordedAtMs: Long = 0L,
+    /** UX 16.11 - a `Delete this chat` of the closed one-to-one with an
+     *  account that started over: the MLS group still reads active (the old
+     *  account's leaves never left it), so the core refuses to delete it. Its
+     *  MLS state is left in the provider, inert (nothing loads it once the
+     *  known-groups row is gone); everything else goes. */
+    val leaveMlsInert: Boolean = false,
 ) {
     /** A person who asked to go gets no notice; everyone else, once. */
     val noticeOwed: Boolean
@@ -218,8 +224,43 @@ internal fun heardEnd(idHex: String, name: String, epoch: ULong, nowMs: Long = S
     OwedEnd(idHex.lowercase(), name, false, epoch.toString(), EndSource.HEARD, EndStage.PUBLISHED, recordedAtMs = nowMs)
 
 /** The first row of a `Delete this chat`: the wipe alone. */
-internal fun chosenEnd(idHex: String, epoch: ULong, nowMs: Long = System.currentTimeMillis()): OwedEnd =
-    OwedEnd(idHex.lowercase(), "", true, epoch.toString(), EndSource.CHOSEN, EndStage.STOPPED, recordedAtMs = nowMs)
+internal fun chosenEnd(
+    idHex: String,
+    epoch: ULong,
+    nowMs: Long = System.currentTimeMillis(),
+    leaveMlsInert: Boolean = false,
+): OwedEnd =
+    OwedEnd(
+        idHex.lowercase(), "", true, epoch.toString(), EndSource.CHOSEN, EndStage.STOPPED,
+        recordedAtMs = nowMs, leaveMlsInert = leaveMlsInert,
+    )
+
+/** What `Delete this chat` does for a conversation (UX 6.2.4, UX 16.11). */
+public enum class DeleteChatPlan {
+    /** Nothing: the conversation is live here. */
+    REFUSED,
+
+    /** The ended conversation is deleted, its MLS state with it. */
+    DELETE,
+
+    /** The closed one-to-one with an account that started over: the MLS
+     *  group still reads active and the core refuses to delete it, so it is
+     *  left inert; every store, the record and the known-groups row go. */
+    DELETE_LEAVING_MLS_INERT,
+}
+
+/**
+ * The gate of `Delete this chat`: the membership ended here, OR the
+ * one-to-one's other person's key belongs to an account that started over
+ * (an unsealed reset; UX 16.11, which offers the button on that closed
+ * one-to-one). [active] is the core's `isActive` for the stored group, `null`
+ * when this device holds no readable group (nothing of it is left to keep).
+ */
+public fun deleteChatPlan(active: Boolean?, peerStartedOver: Boolean): DeleteChatPlan = when {
+    active != true -> DeleteChatPlan.DELETE
+    peerStartedOver -> DeleteChatPlan.DELETE_LEAVING_MLS_INERT
+    else -> DeleteChatPlan.REFUSED
+}
 
 /** Where owed ends live. */
 internal interface MembershipEndStore {

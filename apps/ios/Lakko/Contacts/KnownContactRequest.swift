@@ -172,10 +172,25 @@ public enum KnownContactRequest {
     /// certifies a claimed row: the comparison is with the row's own key.
     ///
     /// Generic over the caller's contact type; `row` reads the slice.
+    ///
+    /// ADR-0101 section 11 / UX 16.11 - a row under a key an UNSEALED reset
+    /// left behind (`startedOverKeysB64`) is the old account, which no longer
+    /// exists. It counts only for its own key (`presentedKeyB64`, the key a
+    /// request was signed with or an invite link names): for the account's
+    /// new key it establishes nothing, so a request or a link from the new
+    /// account is a stranger's, never merged into the old row.
+    ///
+    /// | row key started over | presented key is the row key | counts |
+    /// |----------------------|------------------------------|--------|
+    /// | no                   | -                            | yes    |
+    /// | yes                  | yes                          | yes    |
+    /// | yes                  | no (or unknown)              | no     |
     public static func establishedContactOfAccount<T>(
         accepted: [T],
         accountIdHex: String?,
         verified: Verified,
+        presentedKeyB64: String? = nil,
+        startedOverKeysB64: Set<String> = [],
         row: (T) -> ContactRow
     ) -> T? {
         guard let accountIdHex, !accountIdHex.isEmpty else { return nil }
@@ -184,6 +199,9 @@ public enum KnownContactRequest {
             let r = row(contact)
             guard let rowAccount = r.accountIdHex, rowAccount.lowercased() == wanted,
                   !r.signaturePubkeyB64.isEmpty else { return false }
+            guard rowCountsFor(
+                rowKeyB64: r.signaturePubkeyB64, presentedKeyB64: presentedKeyB64,
+                startedOverKeysB64: startedOverKeysB64) else { return false }
             return verified.pinKeysB64.contains(r.signaturePubkeyB64)
                 || r.signaturePubkeyB64 == verified.bindingKeyB64
         }
@@ -191,10 +209,22 @@ public enum KnownContactRequest {
 
     /// `establishedContactOfAccount` over plain rows.
     public static func establishedContactOfAccount(
-        accepted: [ContactRow], accountIdHex: String?, verified: Verified
+        accepted: [ContactRow], accountIdHex: String?, verified: Verified,
+        presentedKeyB64: String? = nil, startedOverKeysB64: Set<String> = []
     ) -> ContactRow? {
         establishedContactOfAccount(
-            accepted: accepted, accountIdHex: accountIdHex, verified: verified, row: { $0 })
+            accepted: accepted, accountIdHex: accountIdHex, verified: verified,
+            presentedKeyB64: presentedKeyB64, startedOverKeysB64: startedOverKeysB64, row: { $0 })
+    }
+
+    /// Whether a row under `rowKeyB64` can stand for the account when
+    /// `presentedKeyB64` is the key in front of this device (the table on
+    /// ``establishedContactOfAccount(accepted:accountIdHex:verified:presentedKeyB64:startedOverKeysB64:row:)``).
+    public static func rowCountsFor(
+        rowKeyB64: String, presentedKeyB64: String?, startedOverKeysB64: Set<String>
+    ) -> Bool {
+        guard startedOverKeysB64.contains(rowKeyB64) else { return true }
+        return presentedKeyB64 == rowKeyB64
     }
 
     /// Whether a contact row sits under the key that signed a request.

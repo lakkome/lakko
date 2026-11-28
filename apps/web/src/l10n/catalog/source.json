@@ -5627,6 +5627,10 @@
       "comment": "Line under the name on a contact request that comes from an account that started over under a username this device already knew.",
       "security_critical": true
     },
+    "contacts.started_over.row": {
+      "text": "Started over with a new account",
+      "comment": "Second line of a contact row in Contacts for a contact whose account started over (unsealed reset, UX identity-recovery 16.11); replaces the @username."
+    },
     "desktop.capture.body": {
       "text": "Allow it in your system's privacy settings, then try again.",
       "comment": "Second line of the desktop screen shown when the operating system refused Lakko the microphone or camera."
@@ -9407,13 +9411,13 @@
       "comment": "Wrong phrase on the take-the-account-back form."
     },
     "recovery.access_only_note": {
-      "text": "An authenticator code logs you in. On a device that has never held this account you then still need another device, a passkey or your recovery phrase.",
-      "comment": "Note under the list of recovery methods.",
+      "text": "These log you in. On a device that has never held this account you then still need another device, a passkey or your recovery phrase.",
+      "comment": "Note under the list of recovery methods, below the group \"Logs you in on this device\" (an authenticator code, an email code); \"These\" are the ways in that group.",
       "security_critical": true
     },
     "recovery.access_only_note_words": {
-      "text": "Three words or an authenticator code log you in. On a device that has never held this account you need another device, a passkey or your recovery phrase.",
-      "comment": "Note under the list of recovery methods on a device that offers the three-words method. recovery.access_only_note is the wording where it is not offered.",
+      "text": "These log you in. On a device that has never held this account you then still need another device, a passkey or your recovery phrase.",
+      "comment": "Note under the list of recovery methods on a device that offers the three-words method, below the group \"Logs you in on this device\" (three words, an authenticator code, an email code); \"These\" are the ways in that group. Same text as recovery.access_only_note since 2026-11-28.",
       "security_critical": true
     },
     "recovery.cached_account": {
@@ -9494,7 +9498,7 @@
     },
     "recovery.group.signin": {
       "text": "Logs you in on this device",
-      "comment": "Plain heading on the \"Get back in\" screen over the ways that only sign the person in (an authenticator code) and do not bring chats to a new device.",
+      "comment": "Plain heading on the \"Get back in\" screen over the ways that only sign the person in (three words of the phrase on a device that holds it, an authenticator code, an email code) and do not bring chats to a new device.",
       "security_critical": true
     },
     "recovery.lede": {

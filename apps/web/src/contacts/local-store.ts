@@ -923,36 +923,95 @@ export function acceptReset(reset: AcceptedReset, owner?: string): AcceptResetRe
   const stillStartedOver = (existing?.startedOverKeysB64 ?? []).filter((k) => !retired.includes(k));
   if (stillStartedOver.length > 0) pin.startedOverKeysB64 = stillStartedOver;
   else delete pin.startedOverKeysB64;
-  const rowIndex = current.accepted.findIndex(
-    (c) =>
-      accountIdB64OfHex(c.accountIdHex) === reset.accountIdB64 ||
-      retired.includes(c.signaturePubkeyB64),
-  );
-  let accepted = current.accepted;
-  if (rowIndex !== -1) {
-    const row = current.accepted[rowIndex] as AcceptedContact;
-    const previousRowKeys = [...(row.previousSignaturePubkeysB64 ?? [])];
-    if (row.signaturePubkeyB64 !== reset.newKeyB64 && !previousRowKeys.includes(row.signaturePubkeyB64)) {
-      previousRowKeys.push(row.signaturePubkeyB64);
-    }
-    const next: AcceptedContact = {
-      ...row,
-      signaturePubkeyB64: reset.newKeyB64,
-      previousSignaturePubkeysB64: previousRowKeys,
-    };
-    // The x25519 key belonged to the old identity.
-    if (reset.newX25519B64 !== undefined) next.x25519PubkeyB64 = reset.newX25519B64;
-    else delete next.x25519PubkeyB64;
-    // A second row already under the new key (a contact request from the
-    // new identity accepted before the reset was noticed) folds into this
-    // one: one person, one row.
-    accepted = current.accepted
-      .filter((c, i) => i === rowIndex || c.signaturePubkeyB64 !== reset.newKeyB64)
-      .map((c) => (c === row ? next : c));
-  }
+  const accepted = rowsAfterSealedReset(current.accepted, {
+    accountIdB64: reset.accountIdB64,
+    newKeyB64: reset.newKeyB64,
+    retiredKeysB64: retired,
+    leftBehindKeysB64: stillStartedOver,
+    ...(reset.newX25519B64 !== undefined ? { newX25519B64: reset.newX25519B64 } : {}),
+  });
   save(account, { ...current, accepted, pins: { ...current.pins, [reset.accountIdB64]: pin } });
   notifyAcceptedChanged("edited");
   return "accepted";
+}
+
+/**
+ * The contact rows after a SEALED reset this device accepted (ADR-0073 R.2,
+ * ADR-0101 section 10): one person, one row (walk of 2026-11-28, where a
+ * sealed reset left the same person twice in Contacts).
+ *
+ * The row that names the person is re-keyed to the new key; its old key
+ * becomes a display alias. Every OTHER row that names the same person by key
+ * (a key the reset retired, or the new key itself: a request from the new
+ * identity accepted before the reset was noticed, a row the pairing bundle
+ * carried) folds into it. Which row is kept:
+ *
+ *   1. the first row under a retired key (the person's current row);
+ *   2. else the first row under the new key;
+ *   3. else the first row that names the account by id alone.
+ *
+ * Never touched, never folded: a row under a key this account LEFT BEHIND by
+ * an earlier unsealed reset (UX 16.11: that is the started-over account, a
+ * different contact), and a row that names the account by id alone when a
+ * row by key exists (an id can come from a peer's own profile; such a row
+ * may be someone else). Pure.
+ */
+export function rowsAfterSealedReset(
+  rows: readonly AcceptedContact[],
+  reset: {
+    readonly accountIdB64: string;
+    readonly newKeyB64: string;
+    readonly retiredKeysB64: readonly string[];
+    readonly leftBehindKeysB64: readonly string[];
+    readonly newX25519B64?: string;
+  },
+): AcceptedContact[] {
+  const leftBehind = (c: AcceptedContact): boolean => reset.leftBehindKeysB64.includes(c.signaturePubkeyB64);
+  const byRetired = (c: AcceptedContact): boolean =>
+    !leftBehind(c) && reset.retiredKeysB64.includes(c.signaturePubkeyB64);
+  const byNew = (c: AcceptedContact): boolean => c.signaturePubkeyB64 === reset.newKeyB64;
+  const byId = (c: AcceptedContact): boolean =>
+    !leftBehind(c) && accountIdB64OfHex(c.accountIdHex) === reset.accountIdB64;
+  let primaryIndex = rows.findIndex(byRetired);
+  if (primaryIndex === -1) primaryIndex = rows.findIndex(byNew);
+  if (primaryIndex === -1) primaryIndex = rows.findIndex(byId);
+  if (primaryIndex === -1) return [...rows];
+  const primary = rows[primaryIndex] as AcceptedContact;
+  const folded = rows.filter((c, i) => i !== primaryIndex && (byRetired(c) || byNew(c)));
+  const aliases: string[] = [];
+  const alias = (k: string): void => {
+    if (k.length > 0 && k !== reset.newKeyB64 && !aliases.includes(k)) aliases.push(k);
+  };
+  for (const k of primary.previousSignaturePubkeysB64 ?? []) alias(k);
+  alias(primary.signaturePubkeyB64);
+  for (const c of folded) {
+    for (const k of c.previousSignaturePubkeysB64 ?? []) alias(k);
+    alias(c.signaturePubkeyB64);
+  }
+  const rename =
+    primary.displayName.length > 0
+      ? primary.displayName
+      : (folded.find((c) => c.displayName.length > 0)?.displayName ?? "");
+  const next: AcceptedContact = {
+    ...primary,
+    signaturePubkeyB64: reset.newKeyB64,
+    displayName: rename,
+    previousSignaturePubkeysB64: aliases,
+  };
+  if (next.accountIdHex === undefined) {
+    const withId = folded.find((c) => c.accountIdHex !== undefined);
+    if (withId?.accountIdHex !== undefined) next.accountIdHex = withId.accountIdHex;
+  }
+  if (next.groupIdB64 === undefined) {
+    const withChat = folded.find((c) => c.groupIdB64 !== undefined);
+    if (withChat?.groupIdB64 !== undefined) next.groupIdB64 = withChat.groupIdB64;
+  }
+  // The x25519 key belonged to the old identity (a row already under the
+  // new key keeps its own).
+  if (reset.newX25519B64 !== undefined) next.x25519PubkeyB64 = reset.newX25519B64;
+  else if (primary.signaturePubkeyB64 !== reset.newKeyB64) delete next.x25519PubkeyB64;
+  const drop = new Set(folded);
+  return rows.filter((c) => !drop.has(c)).map((c) => (c === primary ? next : c));
 }
 
 /** ADR-0073 R.2: the generation this device last accepted for an account
@@ -1156,9 +1215,15 @@ export type AdoptStartedOverResult =
  * reset of the old account are dropped too), so no conversation moves, no
  * leaf is evicted and nothing is returned. The old keys stay display
  * aliases (the old conversation keeps the person's name) and stay in
- * `startedOverKeysB64` (the old conversation stays closed). The contact ROW
- * is re-keyed to the new key, keeping its rename and losing its link to the
- * old chat; the accept then links it to the new one-to-one.
+ * `startedOverKeysB64` (the old conversation stays closed).
+ *
+ * The contact ROWS are not touched (walk of 2026-11-28, UX 16.11: the new
+ * keys are a new account under the same username). The old row keeps its
+ * key, its rename and its link to the closed one-to-one, and reads "Started
+ * over with a new account" in Contacts; the accept writes a NEW row for the
+ * new key ({@link upsertAccepted} matches by key and proven chain, and the
+ * old key is in neither after this). Until 2026-11-28 the old row was
+ * re-keyed to the new key, which merged two accounts into one contact.
  */
 export function adoptStartedOver(
   accountIdB64: string,
@@ -1198,32 +1263,12 @@ export function adoptStartedOver(
   // are closed like the rest, never moved to the new account.
   delete pin.resetSignedAtMs;
   const leftBehind = [...(existing.startedOverKeysB64 ?? [])];
-  for (const k of existing.supersededKeysB64 ?? []) {
+  for (const k of [...oldKeys, ...(existing.supersededKeysB64 ?? [])]) {
     if (k !== newKeyB64 && !leftBehind.includes(k)) leftBehind.push(k);
   }
   delete pin.supersededKeysB64;
   if (leftBehind.length > 0) pin.startedOverKeysB64 = leftBehind;
-  const rowIndex = current.accepted.findIndex(
-    (c) => accountIdB64OfHex(c.accountIdHex) === accountIdB64 || oldKeys.includes(c.signaturePubkeyB64),
-  );
-  let accepted = current.accepted;
-  if (rowIndex !== -1) {
-    const row = current.accepted[rowIndex] as AcceptedContact;
-    // The row's own alias list is NOT given the old key: those aliases say
-    // "an older one-to-one with this key is still their conversation"
-    // (`contact-conversation.ts`), which is exactly what an unsealed reset
-    // is not. The old conversation keeps the person's name through the
-    // pin's `previousKeysB64` ({@link loadKeyAliases}).
-    const next: AcceptedContact = { ...row, signaturePubkeyB64: newKeyB64 };
-    // The X25519 key and the chat link belonged to the old account; the
-    // accept writes the new chat's link.
-    delete next.x25519PubkeyB64;
-    delete next.groupIdB64;
-    accepted = current.accepted
-      .filter((c, i) => i === rowIndex || c.signaturePubkeyB64 !== newKeyB64)
-      .map((c) => (c === row ? next : c));
-  }
-  save(account, { ...current, accepted, pins: { ...current.pins, [accountIdB64]: pin } });
+  save(account, { ...current, pins: { ...current.pins, [accountIdB64]: pin } });
   notifyAcceptedChanged("edited");
   return "adopted";
 }
@@ -1278,6 +1323,11 @@ export function loadSupersededKeys(owner?: string): Map<string, string> {
 export function loadKeyAliases(owner?: string): Map<string, string> {
   const record = load(ownerOf(owner));
   const out = new Map<string, string>();
+  // UX 16.11 (walk of 2026-11-28): a key that is itself a contact row's is
+  // that row, never an alias of another. After an unsealed reset the account
+  // that started over keeps its own row under its old key, beside the new
+  // account's row; the pin's previous keys must not point it at the new one.
+  const rowKeys = new Set(record.accepted.map((c) => c.signaturePubkeyB64));
   for (const c of record.accepted) {
     for (const old of c.previousSignaturePubkeysB64 ?? []) {
       if (old !== c.signaturePubkeyB64) out.set(old, c.signaturePubkeyB64);
@@ -1287,7 +1337,7 @@ export function loadKeyAliases(owner?: string): Map<string, string> {
     const pin = record.pins[accountIdB64];
     if (pin === undefined) continue;
     for (const old of pin.previousKeysB64 ?? []) {
-      if (old !== c.signaturePubkeyB64 && !out.has(old)) out.set(old, c.signaturePubkeyB64);
+      if (old !== c.signaturePubkeyB64 && !rowKeys.has(old) && !out.has(old)) out.set(old, c.signaturePubkeyB64);
     }
     // ADR-0074 section 3.5: after a PROVEN rotation the row keeps the key the
     // person's leaves are bound to, and the newly pinned key names the same

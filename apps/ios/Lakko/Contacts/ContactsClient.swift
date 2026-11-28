@@ -973,6 +973,30 @@ public final class ContactsClient {
         }
     }
 
+    /// ``refuseContactRequestToUnverifiedKeys(accountId:recipientSignaturePubkey:)``
+    /// for an ADD the person asked for through the account's own invite link
+    /// (UX 16.11): when the account started over (an unsealed reset) and the
+    /// link names exactly its new keys, the person is adding the NEW account.
+    /// The pin moves to those keys as a first pin would (the keys of before
+    /// stay closed, so the old one-to-one stays closed) and the gate runs
+    /// again. Every other refusal stands.
+    func refuseContactRequestToUnverifiedKeysForAdd(
+        accountId: Data,
+        recipientSignaturePubkey: Data
+    ) async throws {
+        do {
+            try await refuseContactRequestToUnverifiedKeys(
+                accountId: accountId, recipientSignaturePubkey: recipientSignaturePubkey)
+        } catch let startedOver as ContactStartedOver {
+            guard startedOver.newKeyB64 == base64Encode(recipientSignaturePubkey),
+                  StartedOverAdd.adopt(
+                    startedOver, pins: pinStore, nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+            else { throw startedOver }
+            try await refuseContactRequestToUnverifiedKeys(
+                accountId: accountId, recipientSignaturePubkey: recipientSignaturePubkey)
+        }
+    }
+
     /// ADR-0060 — the identity bundle of an account a search found, through
     /// the same G-4 pin gate every other identity fetch takes.
     /// Alignment item D (UX 16.11) — the identity gate for an ADD the person

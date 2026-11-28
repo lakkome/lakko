@@ -211,3 +211,35 @@ public fun establishedContactOfAccount(
  */
 public fun isContactKey(requestKeyB64: String, rowKeysB64: List<String>): Boolean =
     requestKeyB64.isNotEmpty() && requestKeyB64 in rowKeysB64
+
+/**
+ * UX 16.11 / ADR-0101 section 11 - whether an established contact row found
+ * by ACCOUNT id still counts for a key that arrived for that account (an
+ * `/i/` link's inviter key, a pending contact's key). An account that started
+ * over (an unsealed reset this device recorded) is a NEW account under the
+ * same username: the old row counts for its own key only.
+ *
+ * | row key is the arriving key | row key started over | the record names the arriving key as new | counts |
+ * |-----------------------------|----------------------|------------------------------------------|--------|
+ * | yes                         | any                  | any                                      | yes    |
+ * | no                          | yes                  | any                                      | no     |
+ * | no                          | no                   | yes                                      | no     |
+ * | no                          | no                   | no                                       | yes    |
+ *
+ * The last row keeps a rotation or a sealed reset this device has not
+ * noticed yet on the "already a contact" page: Open chat runs the gate,
+ * which re-pins a proven or sealed change and refuses anything else.
+ */
+public fun establishedRowCountsForKey(
+    rowKeyB64: String,
+    arrivingKeyB64: String,
+    /** Every key recorded as started over ([startedOverKeysOf]). */
+    startedOverKeysB64: Set<String>,
+    /** The open record's new key for the account, or `null`. */
+    startedOverNewKeyB64: String?,
+): Boolean = when {
+    rowKeyB64 == arrivingKeyB64 -> true
+    rowKeyB64 in startedOverKeysB64 -> false
+    startedOverNewKeyB64 != null && startedOverNewKeyB64 == arrivingKeyB64 -> false
+    else -> true
+}

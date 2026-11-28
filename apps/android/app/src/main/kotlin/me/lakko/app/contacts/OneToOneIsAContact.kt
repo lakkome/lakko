@@ -114,3 +114,17 @@ public fun syntheticContactMessageId(signatureKey: ByteArray): Long {
     val magnitude = value and Long.MAX_VALUE
     return if (magnitude == 0L) -1L else -magnitude
 }
+
+/**
+ * Defect seen 2026-11-28 (the same person twice in Contacts after a SEALED
+ * reset): the accepted reset moved the person's row to the new key (R.2), but
+ * the one-to-one under the key the reset retired was still held, and the
+ * one-to-one rule wrote a second row for its peer under that retired key. A
+ * key an accepted reset retired is no longer the person (ADR-0073 R.5), so it
+ * never gets a row of its own: one person, one row.
+ *
+ * `true` when [peerKeyB64] may be given a contact row by the one-to-one rule
+ * or a merge from another device, `false` when an accepted reset retired it.
+ */
+public fun oneToOnePeerGetsRow(peerKeyB64: String, supersededKeysB64: Set<String>): Boolean =
+    peerKeyB64 !in supersededKeysB64

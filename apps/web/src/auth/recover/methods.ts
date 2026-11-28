@@ -13,12 +13,13 @@
  *   - routes that bring back the keys (and so the chats): another device
  *     first ("if you have one"), then a passkey, then the 12-word phrase;
  *   - routes that only sign the person in: three words from the phrase
- *     and an authenticator code.
+ *     (where offered), an authenticator code, and an email code (ADR-0075,
+ *     UX 19.3: a code sent to the recovery email gives a new password and
+ *     signs the person in; it never brings the keys).
  *
- * Above both stands one row, "Email code" (ADR-0075, UX 19.3): a code sent
- * to the recovery email. It is in neither group: it gives a new password
- * and signs the person in, and never brings the keys (the email vault was
- * removed on 2026-11-26).
+ * Until 2026-11-28 the email row stood above both groups with no heading,
+ * which read as if it belonged under "Brings back your chats"; it is now
+ * the last row of the sign-in group.
  *
  * Nothing in the list depends on server state: before a session the server
  * must not say whether an account has other devices, a passkey, an
@@ -57,9 +58,8 @@ export interface RecoverMethod {
 
 /** A labelled run of rows on the recovery screen. */
 export interface RecoverMethodGroup {
-  readonly id: "email" | "keys" | "signin";
-  /** The plain-text heading over the rows; empty for the email row, which
-   *  stands above both groups with no heading. */
+  readonly id: "keys" | "signin";
+  /** The plain-text heading over the rows. */
   readonly label: string;
   readonly methods: readonly RecoverMethod[];
 }
@@ -84,15 +84,10 @@ const DEVICE = method("device", "smartphone-waves", "recovery.method.device.titl
 const WORDS = method("words", "words", "recovery.method.words.title", "recovery.method.words.sub");
 const TOTP = method("totp", "lock-rotation", "recovery.method.totp.title", "recovery.method.totp.sub");
 
-// ADR-0075 (UX 19.3): first in the list, above both groups, since what it
-// brings depends on the account (the keys while no phrase is saved, a new
-// password only once one is) and nothing may say which before the code was
-// accepted. Always shown: no row depends on server state.
-const EMAIL_GROUP: RecoverMethodGroup = {
-  id: "email",
-  label: "",
-  methods: [method("email", "envelope", "recovery.email.row.title", "recovery.email.row.body")],
-};
+// ADR-0075 (UX 19.3): a code sent to the recovery email gives a new password
+// and signs the person in; it never brings the keys (the email vault was
+// removed on 2026-11-26). Always shown: no row depends on server state.
+const EMAIL = method("email", "envelope", "recovery.email.row.title", "recovery.email.row.body");
 
 const KEYS_GROUP: RecoverMethodGroup = {
   id: "keys",
@@ -112,7 +107,7 @@ function signinGroup(threeWords: boolean): RecoverMethodGroup {
     get label(): string {
       return t("recovery.group.signin");
     },
-    methods: threeWords ? [WORDS, TOTP] : [TOTP],
+    methods: threeWords ? [WORDS, TOTP, EMAIL] : [TOTP, EMAIL],
   };
 }
 
@@ -124,7 +119,7 @@ function signinGroup(threeWords: boolean): RecoverMethodGroup {
 export function recoverMethodGroups(device: {
   readonly threeWords: boolean;
 }): readonly RecoverMethodGroup[] {
-  return [EMAIL_GROUP, KEYS_GROUP, signinGroup(device.threeWords)];
+  return [KEYS_GROUP, signinGroup(device.threeWords)];
 }
 
 /** The catalog key of the note under the list: it names three words only
@@ -145,7 +140,7 @@ export const RECOVER_METHODS: readonly RecoverMethod[] = RECOVER_METHOD_GROUPS.f
 
 /** Whether a route only signs the person in (it never restores keys). */
 export function isSignInOnly(id: RecoverMethodId): boolean {
-  return id === "words" || id === "totp";
+  return id === "words" || id === "totp" || id === "email";
 }
 
 const RESTORE_PASSKEY = method(
@@ -182,7 +177,7 @@ const EARLIER_KEYS_DEVICE = method(
 
 /** The email row. The restore prompt no longer lists it (a mailed code
  *  restores nothing); kept so `restoreMethod("email")` still resolves. */
-const RESTORE_EMAIL = EMAIL_GROUP.methods[0] as RecoverMethod;
+const RESTORE_EMAIL = EMAIL;
 
 /**
  * The restore prompt's rows for this device and account.

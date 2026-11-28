@@ -90,6 +90,10 @@ public class ContactsViewModel(
      *  app has not answered yet. */
     public val invited: StateFlow<List<me.lakko.app.contacts.PendingContact>> = repo.invited
 
+    /** UX 16.11 - the keys whose account started over (an unsealed reset):
+     *  such a row's second line says so instead of the @username. */
+    public val startedOverKeys: StateFlow<Set<String>> get() = repo.startedOverKeys
+
     private fun combineState(): StateFlow<ContactsUiState> {
         // Compose two flows by hand into a single derived
         // StateFlow. kotlinx-coroutines has `combine(...)` for

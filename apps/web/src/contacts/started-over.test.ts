@@ -280,23 +280,37 @@ describe("adoptStartedOver (the person accepted the new account)", () => {
   it("the old conversation stays closed and keeps the person's name", () => {
     adoptStartedOver(ANNA, NEW, 2_000_000);
     expect(loadStartedOverKeys().get(OLD)).toBe(ANNA);
-    expect(loadKeyAliases().get(OLD)).toBe(NEW);
+    // The old key is still its own row's: never an alias of the new account.
+    expect(loadKeyAliases().has(OLD)).toBe(false);
+    upsertAccepted({ signaturePubkeyB64: NEW, displayName: "", acceptedAtMs: 2, accountIdHex: ANNA_HEX });
+    expect(loadKeyAliases().has(OLD)).toBe(false);
   });
 
-  it("the contact row is re-keyed with its rename and loses the old chat's link", () => {
+  it("the old contact row is not touched; the new account gets a row of its own (walk of 2026-11-28)", () => {
     adoptStartedOver(ANNA, NEW, 2_000_000);
-    const rows = loadAccepted();
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
+    expect(loadAccepted()).toEqual([
+      {
+        signaturePubkeyB64: OLD,
+        displayName: "Anna from work",
+        acceptedAtMs: 1,
+        accountIdHex: ANNA_HEX,
+        groupIdB64: "b2xkLWNoYXQ=",
+        x25519PubkeyB64: "b2xkLXgyNTUxOQ==",
+      },
+    ]);
+    // The accept writes the new account's row: never merged into the old one.
+    const rows = upsertAccepted({
       signaturePubkeyB64: NEW,
-      displayName: "Anna from work",
+      displayName: "",
+      acceptedAtMs: 2,
       accountIdHex: ANNA_HEX,
+      groupIdB64: "bmV3LWNoYXQ=",
     });
-    expect(rows[0]?.groupIdB64).toBeUndefined();
-    expect(rows[0]?.x25519PubkeyB64).toBeUndefined();
-    // Not an alias of the row: an older one-to-one with the old key is NOT
-    // "still their conversation" (`contact-conversation.ts`).
-    expect(rows[0]?.previousSignaturePubkeysB64 ?? []).not.toContain(OLD);
+    expect(rows.map((r) => [r.signaturePubkeyB64, r.groupIdB64, r.displayName])).toEqual([
+      [OLD, "b2xkLWNoYXQ=", "Anna from work"],
+      [NEW, "bmV3LWNoYXQ=", ""],
+    ]);
+    expect(rows[1]?.previousSignaturePubkeysB64 ?? []).not.toContain(OLD);
   });
 });
 
@@ -315,9 +329,16 @@ describe("one safety number per conversation (UX 16.11, last bullet)", () => {
     // one and its card is the contact's, over the old key.
     expect(findPersonRecord(loadAccepted(), { groupIdB64: "b2xkLWNoYXQ=", peerKeyB64: OLD })?.signaturePubkeyB64).toBe(OLD);
     adoptStartedOver(ANNA, NEW, 2_000_000);
-    // The old one-to-one finds no contact row: its header opens the card of
-    // its own peer key (the old one), so its number is the old number.
-    expect(findPersonRecord(loadAccepted(), { groupIdB64: "b2xkLWNoYXQ=", peerKeyB64: OLD })).toBeNull();
+    upsertAccepted({
+      signaturePubkeyB64: NEW,
+      displayName: "",
+      acceptedAtMs: 2,
+      accountIdHex: ANNA_HEX,
+      groupIdB64: "bmV3LWNoYXQ=",
+    });
+    // The old one-to-one keeps its own contact row, over the old key, so its
+    // number is the old number.
+    expect(findPersonRecord(loadAccepted(), { groupIdB64: "b2xkLWNoYXQ=", peerKeyB64: OLD })?.signaturePubkeyB64).toBe(OLD);
     // The new one-to-one is bound to the new key: the contact, new number.
     expect(findPersonRecord(loadAccepted(), { groupIdB64: "bmV3LWNoYXQ=", peerKeyB64: NEW })?.signaturePubkeyB64).toBe(NEW);
   });

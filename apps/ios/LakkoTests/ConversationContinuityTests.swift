@@ -233,6 +233,42 @@ final class ConversationContinuityTests: XCTestCase {
         XCTAssertTrue(f.repo.hasGroup(groupIdHex: f.oldHex))
     }
 
+    /// UX 16.11 (2026-11-28) — the closed one-to-one of a person who started
+    /// over is deleted by `Delete chat`, although its MLS group is still
+    /// active here; any other live one-to-one still is not.
+    func testTheClosedOneToOneOfAPersonWhoStartedOverIsDeleted() throws {
+        let f = try makeFixture()
+        AcceptedContactsStore.bind(accountIdB64: f.accountIdB64)
+        defer {
+            PeerPinStore.clear(ownerAccountIdB64: f.accountIdB64)
+            AcceptedContactsStore.bind(accountIdB64: nil)
+        }
+        let pins = PeerPinStore()
+        pins.setPin(
+            accountIdB64: f.peerAccountIdB64, pinnedSignaturePubkeyB64: f.oldPeerKeyB64,
+            rotationMarker: 0, keyGeneration: 1)
+        XCTAssertFalse(f.repo.deleteChat(groupIdHex: f.oldHex), "a live one-to-one is not deleted")
+        XCTAssertEqual(
+            pins.noteStartedOver(
+                accountIdB64: f.peerAccountIdB64, heldKeyB64: f.oldPeerKeyB64,
+                newKeyB64: base64Encode(Data(repeating: 0x09, count: 32)), keyGeneration: 2, signedAtMs: 5),
+            .recorded)
+        XCTAssertEqual(f.repo.membershipStateNow(groupIdHex: f.oldHex), .active, "the MLS group is still active")
+        XCTAssertTrue(f.repo.isStartedOverOneToOne(groupIdHex: f.oldHex))
+        XCTAssertTrue(f.repo.deleteChat(groupIdHex: f.oldHex), "deleted, the MLS state left inert")
+        XCTAssertFalse(f.repo.hasGroup(groupIdHex: f.oldHex))
+        XCTAssertTrue(f.repo.state.threads.allSatisfy { $0.groupIdHex != f.oldHex })
+        XCTAssertTrue(f.repo.hasGroup(groupIdHex: f.successorHex), "the other one-to-one stays")
+        XCTAssertFalse(f.repo.deleteChat(groupIdHex: f.successorHex), "and is still not deletable")
+    }
+
+    func testTheDeleteGateIsAnEndedMembershipOrAPersonWhoStartedOver() {
+        XCTAssertTrue(StartedOverChat.deletable(membershipEnded: true, peerStartedOver: false))
+        XCTAssertTrue(StartedOverChat.deletable(membershipEnded: false, peerStartedOver: true))
+        XCTAssertTrue(StartedOverChat.deletable(membershipEnded: true, peerStartedOver: true))
+        XCTAssertFalse(StartedOverChat.deletable(membershipEnded: false, peerStartedOver: false))
+    }
+
     // MARK: - R.7 case 1: the dead session
 
     func testAOneToOneWhoseOtherPersonResetIsADeadSessionAndTheOtherIsNot() throws {

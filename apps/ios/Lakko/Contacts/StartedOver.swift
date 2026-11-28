@@ -74,6 +74,15 @@ enum StartedOverChat {
         case notSent
     }
 
+    /// 2026-11-28 — whether `Delete chat` may delete the conversation: its
+    /// membership ended here, or it is the one-to-one with a person who
+    /// started over (its MLS group is still active, but nothing will ever
+    /// arrive or leave there; the group's state is left inert). Same
+    /// confirmation as an ended chat.
+    static func deletable(membershipEnded: Bool, peerStartedOver: Bool) -> Bool {
+        membershipEnded || peerStartedOver
+    }
+
     static func unsent(oneToOne: Bool, peerKeyB64: String?, startedOverKeysB64: Set<String>) -> Unsent {
         bottom(oneToOne: oneToOne, peerKeyB64: peerKeyB64, startedOverKeysB64: startedOverKeysB64) == .closedLine
             ? .notSent : .send
@@ -102,8 +111,44 @@ enum StartedOverAdd {
 /// no `Add to contacts`: that account no longer exists, and adding it would
 /// pin keys whose devices are gone. The person's new account is added by
 /// name or from its own request.
+///
+/// Defect c (2026-11-28) — the card is built as for a conversation this
+/// device is out of (`membershipEnded`): no Call, Message opens the closed
+/// history, and Delete chat is offered while the one-to-one is here.
 enum StartedOverCard {
-    static func sections(_ sections: [InfoSection], keyStartedOver: Bool) -> [InfoSection] {
-        keyStartedOver ? sections.filter { $0 != .addContact } : sections
+    /// The `membershipEnded` the card's ``PersonInfoCapabilities`` carries.
+    static func membershipEnded(chatEnded: Bool, keyStartedOver: Bool) -> Bool {
+        chatEnded || keyStartedOver
+    }
+
+    static func sections(_ sections: [InfoSection], keyStartedOver: Bool, hasChat: Bool = true) -> [InfoSection] {
+        guard keyStartedOver else { return sections }
+        return sections.filter { section in
+            switch section {
+            case .addContact, .call: return false
+            // Delete chat names the one-to-one: none here, nothing to delete.
+            case .deleteChat: return hasChat
+            default: return true
+            }
+        }
+    }
+}
+
+/// Defect b (2026-11-28) — the second line of a contact row in Contacts: a
+/// row under a key an unsealed reset left behind reads
+/// `contacts.started_over.row` in place of the `@username`, so the old
+/// account and the new one are told apart.
+enum StartedOverRow {
+    static let lineKey = "contacts.started_over.row"
+
+    enum SecondLine: Equatable {
+        case startedOver
+        case username(String)
+        case none
+    }
+
+    static func secondLine(usernameLine: String?, keyStartedOver: Bool) -> SecondLine {
+        if keyStartedOver { return .startedOver }
+        return usernameLine.map { .username($0) } ?? .none
     }
 }

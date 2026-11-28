@@ -50,8 +50,8 @@ import me.lakko.app.R
  *     one"), a passkey, the 12-word recovery phrase.
  *   - **Signs you in on this device**: three words from the phrase (only on
  *     a device that holds the phrase and the keys of its cached account),
- *     an authenticator code. These sign in only; afterwards the app offers
- *     "Choose a new password".
+ *     an authenticator code, an email code. These sign in only; afterwards
+ *     the app offers "Choose a new password" ([recoverListGroups]).
  *
  * Nothing in the list depends on server state: before a session the server
  * must not say whether an account has other devices, a passkey or an
@@ -100,57 +100,27 @@ public fun RecoverScreen(
             )
             FormError(state.listLine)
             Spacer(Modifier.height(16.dp))
-            // UX 19.3 - first, above both groups: what it brings depends on
-            // the account, and no row depends on server state.
-            MethodRow(
-                icon = R.drawable.ic_lk_envelope,
-                title = t("recovery.email.row.title"),
-                subtitle = t("recovery.email.row.body"),
-                onClick = {
-                    viewModel.openEmail()
-                    method = RecoverMode.Email
-                },
-            )
-            Spacer(Modifier.height(12.dp))
-            GroupLabel(t("recovery.group.keys"))
-            MethodRow(
-                icon = R.drawable.ic_lk_smartphone_waves,
-                title = t("recovery.method.device.title"),
-                subtitle = t("recovery.method.device.sub"),
-                onClick = { method = RecoverMode.AnotherDevice },
-            )
-            MethodRow(
-                icon = R.drawable.ic_lk_passkey,
-                title = t("recovery.method.passkey.title"),
-                subtitle = t("recovery.method.passkey.sub"),
-                onClick = { method = RecoverMode.Passkey },
-            )
-            MethodRow(
-                icon = R.drawable.ic_lk_key,
-                title = t("recovery.method.phrase.title"),
-                subtitle = t("recovery.method.phrase.sub"),
-                onClick = { method = RecoverMode.Phrase },
-            )
-            Spacer(Modifier.height(12.dp))
-            GroupLabel(t("recovery.group.signin"))
             val wordsAccount = threeWords
-            if (wordsAccount != null) {
-                MethodRow(
-                    icon = R.drawable.ic_lk_words,
-                    title = t("recovery.method.words.title"),
-                    subtitle = t("recovery.method.words.sub"),
-                    onClick = {
-                        viewModel.openWords(wordsAccount)
-                        method = RecoverMode.Words
-                    },
-                )
+            recoverListGroups(threeWords = wordsAccount != null).forEachIndexed { index, group ->
+                if (index > 0) Spacer(Modifier.height(12.dp))
+                GroupLabel(t(group.labelKey))
+                for (mode in group.modes) {
+                    val row = recoverRowCopy(mode)
+                    MethodRow(
+                        icon = recoverRowIcon(mode),
+                        title = t(row.titleKey),
+                        subtitle = t(row.subtitleKey),
+                        onClick = {
+                            when (mode) {
+                                RecoverMode.Words -> wordsAccount?.let { viewModel.openWords(it) }
+                                RecoverMode.Email -> viewModel.openEmail()
+                                else -> Unit
+                            }
+                            method = mode
+                        },
+                    )
+                }
             }
-            MethodRow(
-                icon = R.drawable.ic_lk_lock_rotation,
-                title = t("recovery.method.totp.title"),
-                subtitle = t("recovery.method.totp.sub"),
-                onClick = { method = RecoverMode.Authenticator },
-            )
             Spacer(Modifier.height(12.dp))
             Lead(t(accessOnlyNoteKey(threeWords = wordsAccount != null)))
             Spacer(Modifier.height(16.dp))
@@ -166,6 +136,60 @@ public fun RecoverScreen(
         RecoverMode.Authenticator -> AuthenticatorForm(state, cachedUsername, viewModel, back, modifier)
         RecoverMode.Email -> EmailCodeForm(state, cachedUsername, viewModel, back, modifier)
     }
+}
+
+/** A labelled run of rows on the "Get back in" list. */
+public data class RecoverListGroup(val labelKey: String, val modes: List<RecoverMode>)
+
+/**
+ * The rows of the "Get back in" list, in two groups (UX 19.3, amended
+ * 2026-11-28):
+ *
+ *  - `recovery.group.keys` ("Brings back your chats"): another device, a
+ *    passkey, the 12-word phrase;
+ *  - `recovery.group.signin` ("Logs you in on this device"): three words
+ *    (only where offered), an authenticator code, an email code.
+ *
+ * The email code sits in the sign-in group: since the email vault was removed
+ * (ADR-0075, amended 2026-11-26) a mailed code gives a new password and never
+ * brings the keys. Until 2026-11-28 it stood above both groups with no
+ * heading, which read as if it brought the chats back.
+ */
+public fun recoverListGroups(threeWords: Boolean): List<RecoverListGroup> = listOf(
+    RecoverListGroup(
+        labelKey = "recovery.group.keys",
+        modes = listOf(RecoverMode.AnotherDevice, RecoverMode.Passkey, RecoverMode.Phrase),
+    ),
+    RecoverListGroup(
+        labelKey = "recovery.group.signin",
+        modes = listOfNotNull(
+            RecoverMode.Words.takeIf { threeWords },
+            RecoverMode.Authenticator,
+            RecoverMode.Email,
+        ),
+    ),
+)
+
+/** The catalog keys of a row's title and line. */
+public data class RecoverRowCopy(val titleKey: String, val subtitleKey: String)
+
+/** The title and line of a row of the "Get back in" list. */
+public fun recoverRowCopy(mode: RecoverMode): RecoverRowCopy = when (mode) {
+    RecoverMode.AnotherDevice -> RecoverRowCopy("recovery.method.device.title", "recovery.method.device.sub")
+    RecoverMode.Passkey -> RecoverRowCopy("recovery.method.passkey.title", "recovery.method.passkey.sub")
+    RecoverMode.Phrase -> RecoverRowCopy("recovery.method.phrase.title", "recovery.method.phrase.sub")
+    RecoverMode.Words -> RecoverRowCopy("recovery.method.words.title", "recovery.method.words.sub")
+    RecoverMode.Authenticator -> RecoverRowCopy("recovery.method.totp.title", "recovery.method.totp.sub")
+    RecoverMode.Email -> RecoverRowCopy("recovery.email.row.title", "recovery.email.row.body")
+}
+
+private fun recoverRowIcon(mode: RecoverMode): Int = when (mode) {
+    RecoverMode.AnotherDevice -> R.drawable.ic_lk_smartphone_waves
+    RecoverMode.Passkey -> R.drawable.ic_lk_passkey
+    RecoverMode.Phrase -> R.drawable.ic_lk_key
+    RecoverMode.Words -> R.drawable.ic_lk_words
+    RecoverMode.Authenticator -> R.drawable.ic_lk_lock_rotation
+    RecoverMode.Email -> R.drawable.ic_lk_envelope
 }
 
 /** The catalog key of the note under the list: it names three words only

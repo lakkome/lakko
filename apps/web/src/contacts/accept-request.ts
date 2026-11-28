@@ -78,8 +78,9 @@ export async function acceptContactRequest(
   // decision, so the key this device trusts for the account moves to the
   // request's key first (only when a pending started-over record names
   // exactly that key; a no-op for every other request). The old one-to-one
-  // stays closed and nothing else follows from it. Done before anything is
-  // read from the contact list: the row is re-keyed and keeps its rename.
+  // stays closed and nothing else follows from it. The old contact row is
+  // not touched (walk of 2026-11-28): the new account gets a row of its own
+  // below, and the old one reads "Started over with a new account".
   if (req.fromAccountId !== null) {
     deps.client.adoptStartedOverRequest?.(req.fromAccountId, req.fromPubkey);
   }

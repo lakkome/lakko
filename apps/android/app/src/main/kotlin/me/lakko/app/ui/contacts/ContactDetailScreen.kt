@@ -226,7 +226,10 @@ public fun ContactDetailScreen(
             me.lakko.app.ui.suspension.readOnlySections(suspended = suspendedReadOnlyInfo, sections =
             personInfoSections(
                 PersonInfoCapabilities(
-                    membershipEnded = membershipEnded,
+                    // UX 16.11 - the old account's one-to-one is closed: the
+                    // card turns over as for an ended membership (no Call,
+                    // Message opens the history, Delete chat offered).
+                    membershipEnded = personCardMembershipEnded(membershipEnded, keyStartedOver),
                     isContact = isContact,
                     contactsOfContactsOn = contactsOfContactsOn,
                     isBlocked = isBlocked,

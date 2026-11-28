@@ -906,6 +906,14 @@ export function MembershipEndProvider(props: { children: JSX.Element }): JSX.Ele
         conversationHex: input.conversationHex,
         chats,
         contexts,
+        // A `groupStillActive` refusal is not a failure here: the
+        // conversation's MLS state stays on disk, INERT (no row names it, so
+        // nothing loads, reads or sends in it again), and everything else is
+        // dropped with the registry row last. That is the delete of the
+        // closed one-to-one of a contact who started over (UX 16.11, walk of
+        // 2026-11-28): nobody ever removed this device from that group and
+        // nobody is left to, so `Group::delete` refuses it; iOS
+        // `removeGroupLocally` tolerates the same refusal.
         deleteGroup: async (groupIdB64) => {
           await withGroupMlsLock(groupIdB64, async () => {
             const entry = chats.get(groupIdB64);

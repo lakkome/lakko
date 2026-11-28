@@ -14,6 +14,7 @@ import {
   SIBLING_ADMIT_WAIT_MS,
   siblingMayAdmit,
 } from "./known-contact-request";
+import { invitePageView } from "./invite-page";
 
 describe("knownContactRequestVerdict", () => {
   const base = { senderIsContact: true, check: "current" as const, requestKeyB64: "new", trustedKeyB64: "new" };
@@ -181,6 +182,57 @@ describe("establishedContactOfAccount", () => {
       { signaturePubkeyB64: "victim-key", accountIdHex: "aabb" },
     ];
     expect(establishedContactOfAccount(rows, "aabb", { pinKeysB64: ["victim-key"], bindingKeyB64: null })).toBe(rows[1]);
+  });
+});
+
+describe("an account that started over (UX 16.11, walk of 2026-11-28)", () => {
+  // Before the person decided: the pin still names the old key, which the
+  // account left behind by an unsealed reset.
+  const pinned = { pinKeysB64: ["old"], bindingKeyB64: null, leftBehindKeysB64: ["old"] };
+  const rows = [{ signaturePubkeyB64: "old", accountIdHex: "aabb" }];
+
+  it("the row of the account that started over establishes nothing for its new keys", () => {
+    expect(establishedContactOfAccount(rows, "aabb", pinned)).toBeUndefined();
+    // Without the left-behind list the old row would make the new account's
+    // invite link read "already in your contacts" (the walk's defect).
+    expect(establishedContactOfAccount(rows, "aabb", { pinKeysB64: ["old"], bindingKeyB64: null })).toBe(rows[0]);
+  });
+
+  it("so the new account's invite link shows the ordinary Add page", () => {
+    const existing = establishedContactOfAccount(rows, "aabb", pinned);
+    const view = invitePageView({
+      link: "opened",
+      expired: false,
+      inviterDisplayName: "Anna",
+      inviterUsername: "anna",
+      label: "",
+      signedIn: true,
+      isOwn: false,
+      existingContactKeyB64: existing?.signaturePubkeyB64 ?? null,
+    });
+    expect(view.kind).toBe("default");
+  });
+
+  it("so a request from the new keys is not answered silently: it is a stranger's", () => {
+    const known = establishedContactOfAccount(rows, "aabb", pinned) ?? contactSignedBy(rows, "new");
+    expect(known).toBeUndefined();
+    // A stranger's request: through a live link it is accepted by the link
+    // path, else it is listed (with the note, `started-over.ts`).
+    expect(
+      knownContactRequestVerdict({
+        senderIsContact: known !== undefined,
+        check: "started-over",
+        requestKeyB64: "new",
+        trustedKeyB64: "old",
+        startedOverKeyB64: "new",
+      }),
+    ).toBe("show");
+  });
+
+  it("after the person accepted the new account its own row is the contact, never the old one", () => {
+    const both = [...rows, { signaturePubkeyB64: "new", accountIdHex: "aabb" }];
+    const after = { pinKeysB64: ["new"], bindingKeyB64: null, leftBehindKeysB64: ["old"] };
+    expect(establishedContactOfAccount(both, "aabb", after)).toBe(both[1]);
   });
 });
 

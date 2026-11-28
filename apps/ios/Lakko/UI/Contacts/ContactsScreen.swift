@@ -365,7 +365,10 @@ public struct ContactsScreen: View {
                     switch id {
                     case .contact(let messageId):
                         if let contact = contactsById[messageId] {
-                            ContactRow(contact: contact)
+                            ContactRow(
+                                contact: contact,
+                                startedOver: viewModel.startedOverKeys.contains(
+                                    base64Encode(contact.request.fromPubkey)))
                         }
                     case .invited(let accountIdHex):
                         if let contact = invitedById[accountIdHex] {
@@ -507,6 +510,9 @@ private struct InvitedRow: View {
 /// detail through the tab's route table.
 private struct ContactRow: View {
     let contact: AcceptedContact
+    /// UX 16.11 — the row's key is one an unsealed reset left behind.
+    var startedOver = false
+    @ObservedObject private var l10n = Localization.shared
     /// ADR-0084, UX profile-screen section 7 — the photo's video plays while
     /// a pointer hovers the row; `.onHover` never fires for a finger.
     @State private var hovering = false
@@ -526,10 +532,18 @@ private struct ContactRow: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(resolved.name)
                             .foregroundStyle(Color.lakkoText)
-                        if let line = resolved.usernameLine {
+                        switch StartedOverRow.secondLine(
+                            usernameLine: resolved.usernameLine, keyStartedOver: startedOver) {
+                        case .startedOver:
+                            Text(l10n.t(StartedOverRow.lineKey))
+                                .font(.subheadline)
+                                .foregroundStyle(Color.lakkoTextMuted)
+                        case .username(let line):
                             Text(line)
                                 .font(.subheadline)
                                 .foregroundStyle(Color.lakkoTextMuted)
+                        case .none:
+                            EmptyView()
                         }
                     }
                 }

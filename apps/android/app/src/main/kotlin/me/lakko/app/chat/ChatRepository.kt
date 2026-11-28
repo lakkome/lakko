@@ -16330,6 +16330,15 @@ public class ChatRepository(
                         }
                     }
                     val record = groups[row.idHex] ?: return@sessionLock MlsDelete.DELETED
+                    // UX 16.11 - the closed one-to-one with an account that
+                    // started over still reads active and the core refuses
+                    // to delete it: its MLS state stays, inert (the
+                    // known-groups row goes last, so nothing loads it again).
+                    if (row.source == EndSource.CHOSEN && row.leaveMlsInert &&
+                        readIsActive { record.group.isActive() } == true
+                    ) {
+                        return@sessionLock MlsDelete.DELETED
+                    }
                     try {
                         when (row.source) {
                             EndSource.HEARD -> record.group.deleteAfterEndedElsewhere(identity, row.epochValue)
@@ -17984,7 +17993,18 @@ public class ChatRepository(
     public fun deleteEndedChat(groupIdHex: String) {
         val accountIdB64 = currentAccountIdB64.get() ?: return
         val hex = groupIdHex.lowercase()
-        if (!membershipEnds.save(accountIdB64, chosenEnd(hex, 0u))) return
+        // UX 16.11 - the closed one-to-one with an account that started over
+        // is deleted too, although its group still reads active.
+        val plan = deleteChatPlan(
+            active = if (groups[hex] == null) null else isGroupActive(hex),
+            peerStartedOver = startedOverOneToOne(hex),
+        )
+        if (plan == DeleteChatPlan.REFUSED) {
+            android.util.Log.w("ChatRepository", "UX 6.2.4: delete refused for a live conversation")
+            return
+        }
+        val row = chosenEnd(hex, 0u, leaveMlsInert = plan == DeleteChatPlan.DELETE_LEAVING_MLS_INERT)
+        if (!membershipEnds.save(accountIdB64, row)) return
         endingGroups += hex
         publishThreadList()
         pushScope.launchSession { runOwedMembershipEnds() }

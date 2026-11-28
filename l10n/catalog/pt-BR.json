@@ -8090,11 +8090,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "Um código do autenticador faz você entrar. Em um dispositivo que nunca teve esta conta, depois você ainda precisa de outro dispositivo, de uma chave de acesso ou da sua frase de recuperação.",
+      "text": "Estas opções fazem você entrar. Em um dispositivo que nunca teve esta conta, depois você ainda precisa de outro dispositivo, de uma chave de acesso ou da sua frase de recuperação.",
       "status": "machine"
     },
     "recovery.access_only_note_words": {
-      "text": "Três palavras ou um código do autenticador fazem você entrar. Em um dispositivo que nunca teve esta conta, você precisa de outro dispositivo, de uma chave de acesso ou da sua frase de recuperação.",
+      "text": "Estas opções fazem você entrar. Em um dispositivo que nunca teve esta conta, depois você ainda precisa de outro dispositivo, de uma chave de acesso ou da sua frase de recuperação.",
       "status": "machine"
     },
     "recovery.cached_account": {

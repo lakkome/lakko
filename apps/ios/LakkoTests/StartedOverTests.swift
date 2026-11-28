@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import Combine
 import XCTest
 import LakkoCore
 @testable import Lakko
@@ -240,7 +241,7 @@ final class StartedOverTests: XCTestCase {
         XCTAssertEqual(StartedOverCard.sections(removed, keyStartedOver: false), removed)
         XCTAssertEqual(
             StartedOverCard.sections(removed, keyStartedOver: true),
-            removed.filter { $0 != .addContact }, "nothing else changes")
+            removed.filter { $0 != .addContact && $0 != .call }, "nothing else changes but the call")
     }
 
     // MARK: - The two surfaces (UX 16.11)
@@ -323,4 +324,239 @@ final class StartedOverTests: XCTestCase {
         flow.primary()
         XCTAssertEqual(flow.state, .failed)
     }
+}
+
+/// The four defects of the unsealed-reset walk of 2026-11-28 (UX
+/// `identity-recovery.md` 16.11, ADR-0101 section 11, ADR-0079): the old
+/// contact counts only for its own key, so the new account is added as a new
+/// contact; a sealed reset leaves one row; the old card offers no call; the
+/// old row says the account started over.
+@MainActor
+final class StartedOverContactsTests: XCTestCase {
+
+    private let account = "started-over-contacts-account"
+    private var suiteName = ""
+    private let anyaId = Data(repeating: 0xA1, count: 16)
+    private let oldKey = Data(repeating: 0x01, count: 32)
+    private let newKey = Data(repeating: 0x02, count: 32)
+
+    override func setUp() {
+        super.setUp()
+        suiteName = "started-over-contacts-\(UUID().uuidString)"
+        AcceptedContactsStore.defaults = UserDefaults(suiteName: suiteName)!
+        AcceptedContactsStore.bind(accountIdB64: account)
+        PeerPinStore.clear(ownerAccountIdB64: account)
+        ContactsInboxStore().clear(accountIdB64: account)
+        KeychainSentRequestsStore().clear(accountIdB64: account)
+    }
+
+    override func tearDown() {
+        PeerPinStore.clear(ownerAccountIdB64: account)
+        ContactsInboxStore().clear(accountIdB64: account)
+        KeychainSentRequestsStore().clear(accountIdB64: account)
+        KnownRequestWaitingStore().clear(accountIdB64: account)
+        UserDefaults().removePersistentDomain(forName: suiteName)
+        AcceptedContactsStore.defaults = .standard
+        AcceptedContactsStore.bind(accountIdB64: nil)
+        super.tearDown()
+    }
+
+    private func request(_ id: Int64, key: Data, accountId: Data?) -> IncomingContactRequest {
+        IncomingContactRequest(
+            messageId: id, fromPubkey: key, fromAccountId: accountId,
+            fromPseudonym: Data(count: 32), validAfterMs: 0, intro: nil,
+            createdAt: "2026-11-28T10:00:00Z")
+    }
+
+    private func row(_ id: Int64, key: Data, accountId: Data?, previous: [Data] = []) -> AcceptedContact {
+        AcceptedContact(
+            request: request(id, key: key, accountId: accountId),
+            groupIdHex: nil, displayName: nil,
+            previousKeysB64: previous.isEmpty ? nil : previous.map(base64Encode))
+    }
+
+    private func makeRepository() -> ContactsRepository {
+        let repository = ContactsRepository(
+            authRepository: AuthRepository.offline(
+                authClientFactory: { Offline.auth() },
+                persistence: StartedOverNoSession(),
+                nowMs: { 1_000_000 }),
+            accountBinding: Just<String?>(account).eraseToAnyPublisher())
+        // The offline auth repository has no session and unbinds the stores
+        // the pin store keys on: bound again to the account under test.
+        AcceptedContactsStore.bind(accountIdB64: account)
+        return repository
+    }
+
+    /// Anya's old row, pinned under the old key, and her unsealed reset
+    /// recorded here.
+    private func startedOverRepository() -> ContactsRepository {
+        AcceptedContactsStore.save([row(7, key: oldKey, accountId: anyaId)], accountIdB64: account)
+        let pins = PeerPinStore()
+        pins.setPin(
+            accountIdB64: base64Encode(anyaId), pinnedSignaturePubkeyB64: base64Encode(oldKey),
+            rotationMarker: 10, keyGeneration: 1)
+        XCTAssertEqual(
+            pins.noteStartedOver(
+                accountIdB64: base64Encode(anyaId), heldKeyB64: base64Encode(oldKey),
+                newKeyB64: base64Encode(newKey), keyGeneration: 2, signedAtMs: 5),
+            .recorded)
+        return makeRepository()
+    }
+
+    // MARK: - a1: the invite page
+
+    func testARowOfAKeyThatStartedOverCountsOnlyForItsOwnKey() {
+        let old = KnownContactRequest.ContactRow(
+            signaturePubkeyB64: "old", accountIdHex: "a1")
+        let verified = KnownContactRequest.Verified(pinKeysB64: ["old"], bindingKeyB64: nil)
+        XCTAssertNil(KnownContactRequest.establishedContactOfAccount(
+            accepted: [old], accountIdHex: "a1", verified: verified,
+            presentedKeyB64: "new", startedOverKeysB64: ["old"]), "the new account is not this contact")
+        XCTAssertEqual(KnownContactRequest.establishedContactOfAccount(
+            accepted: [old], accountIdHex: "a1", verified: verified,
+            presentedKeyB64: "old", startedOverKeysB64: ["old"]), old, "its own key still is")
+        XCTAssertEqual(KnownContactRequest.establishedContactOfAccount(
+            accepted: [old], accountIdHex: "a1", verified: verified,
+            presentedKeyB64: "new", startedOverKeysB64: []), old, "no unsealed reset: by the account, as before")
+        XCTAssertTrue(KnownContactRequest.rowCountsFor(
+            rowKeyB64: "k", presentedKeyB64: nil, startedOverKeysB64: []))
+        XCTAssertFalse(KnownContactRequest.rowCountsFor(
+            rowKeyB64: "k", presentedKeyB64: nil, startedOverKeysB64: ["k"]))
+    }
+
+    func testTheNewAccountsLinkIsNotAnEstablishedContactHere() {
+        let repository = startedOverRepository()
+        XCTAssertEqual(repository.state.accepted.count, 1)
+        XCTAssertNil(
+            repository.establishedContact(ofAccountId: anyaId, presentedKey: newKey),
+            "Add, not \"already in your contacts\"")
+        XCTAssertEqual(
+            repository.establishedContact(ofAccountId: anyaId, presentedKey: oldKey)?.request.messageId, 7)
+    }
+
+    func testAPendingContactIsTheInviterOnlyUnderTheLinksKey() {
+        let pending = PendingContact(
+            accountIdHex: "a1", signaturePubkey: oldKey, x25519Pubkey: Data(count: 32),
+            displayName: "Anya", username: "anya", addedAtMs: 1, linkId: Data(count: 16))
+        XCTAssertTrue(ContactsRepository.pendingIsInviter(pending, accountIdHex: "a1", signatureKey: oldKey))
+        XCTAssertFalse(ContactsRepository.pendingIsInviter(pending, accountIdHex: "a1", signatureKey: newKey))
+        XCTAssertFalse(ContactsRepository.pendingIsInviter(pending, accountIdHex: "b2", signatureKey: oldKey))
+    }
+
+    // MARK: - a2: the request from the new keys
+
+    func testARequestFromTheNewKeysIsAStrangersAndIsNotSwallowed() async {
+        let repository = startedOverRepository()
+        let fromNew = request(40, key: newKey, accountId: anyaId)
+        let handled = await repository.handleKnownContactRequest(
+            fromNew, client: ContactsClient(pinStore: PeerPinStore()))
+        XCTAssertFalse(handled, "listed (or decided through the link), never answered or dropped as the old contact")
+        XCTAssertTrue(
+            KnownRequestWaitingStore().load(accountIdB64: account).isEmpty, "not held as a known contact's")
+    }
+
+    func testAcceptingTheNewKeysTakesThemAndLeavesTheOldRowAlone() {
+        let repository = startedOverRepository()
+        repository.adoptStartedOverKeys(of: request(40, key: newKey, accountId: anyaId))
+        let pins = PeerPinStore()
+        XCTAssertEqual(pins.readPin(accountIdB64: base64Encode(anyaId))?.pinnedSignaturePubkeyB64, base64Encode(newKey))
+        XCTAssertTrue(pins.isStartedOverKey(base64Encode(oldKey)), "the old one-to-one stays closed")
+        // A new row for the new keys; the old row untouched (never re-keyed).
+        let accepted = ContactsRepository.accepting(
+            request(40, key: newKey, accountId: anyaId), into: repository.state.accepted, groupIdHex: "new")
+        XCTAssertEqual(accepted.map(\.request.fromPubkey), [oldKey, newKey])
+        XCTAssertEqual(accepted.first, repository.state.accepted.first)
+        // Afterwards the old row establishes nothing, the new one does.
+        XCTAssertNil(repository.establishedContact(ofAccountId: anyaId, presentedKey: oldKey))
+        // A later reset of the NEW account never re-keys the old row.
+        let rekeyed = ContactRekey.afterReset(
+            accepted: [row(7, key: oldKey, accountId: anyaId)] + [row(40, key: newKey, accountId: anyaId)],
+            accountIdB64: base64Encode(anyaId), previousKeyB64: base64Encode(Data(repeating: 9, count: 32)),
+            newKey: Data(repeating: 3, count: 32), startedOverKeysB64: [base64Encode(oldKey)])
+        XCTAssertEqual(rekeyed.map(\.request.fromPubkey), [oldKey, Data(repeating: 3, count: 32)])
+    }
+
+    func testARequestFromAnyOtherKeyIsNotMarkedAsTheNewAccount() {
+        XCTAssertFalse(StartedOverRequest.adoptsNewKeys(
+            requestKeyB64: base64Encode(oldKey), pendingNewKeyB64: base64Encode(newKey)))
+    }
+
+    // MARK: - b: one row after a sealed reset
+
+    func testTheOneToOneOfTheKeyBeforeASealedResetAddsNoSecondRow() {
+        // The row re-keyed by the sealed reset, the old key an alias of it.
+        let rekeyed = row(7, key: newKey, accountId: anyaId, previous: [oldKey])
+        XCTAssertNil(ContactsRepository.adopting(
+            [rekeyed], signatureKey: oldKey, accountId: anyaId, groupIdHex: "old-chat",
+            nowMs: 5, createdAt: "2026-11-28T10:00:00Z"), "the old one-to-one is the same person")
+    }
+
+    func testASecondRowLeftByASealedResetFoldsIntoThePersonsRow() {
+        let rekeyed = row(7, key: newKey, accountId: anyaId, previous: [oldKey])
+        let stray = AcceptedContact(
+            request: request(ContactsRepository.syntheticContactMessageId(signatureKey: oldKey),
+                             key: oldKey, accountId: nil),
+            groupIdHex: "old-chat", displayName: "Anya Seal")
+        for rows in [[rekeyed, stray], [stray, rekeyed]] {
+            let out = ContactsRepository.reconciled(accepted: rows, pending: []).accepted
+            XCTAssertEqual(out.count, 1, "one person, one row")
+            XCTAssertEqual(out.first?.request.fromPubkey, newKey, "under the key of after the reset")
+            XCTAssertEqual(out.first?.request.messageId, 7)
+            XCTAssertEqual(out.first?.displayName, "Anya Seal", "the rename is kept")
+            XCTAssertEqual(out.first?.previousKeysB64, [base64Encode(oldKey)])
+        }
+    }
+
+    func testTheOldRowOfAnUnsealedResetAndTheNewRowStayTwo() {
+        let old = row(7, key: oldKey, accountId: anyaId)
+        let new = row(40, key: newKey, accountId: anyaId)
+        XCTAssertEqual(ContactsRepository.reconciled(accepted: [old, new], pending: []).accepted, [old, new])
+        XCTAssertNotNil(ContactsRepository.adopting(
+            [new], signatureKey: oldKey, accountId: anyaId, groupIdHex: "old-chat",
+            nowMs: 5, createdAt: "2026-11-28T10:00:00Z"), "the old account keeps its own row")
+    }
+
+    // MARK: - b: the row's second line
+
+    func testTheOldRowSaysTheAccountStartedOver() {
+        XCTAssertEqual(StartedOverRow.secondLine(usernameLine: "@anya", keyStartedOver: true), .startedOver)
+        XCTAssertEqual(StartedOverRow.secondLine(usernameLine: "@anya", keyStartedOver: false), .username("@anya"))
+        XCTAssertEqual(StartedOverRow.secondLine(usernameLine: nil, keyStartedOver: false), .none)
+        XCTAssertNotEqual(Localization.text(StartedOverRow.lineKey), StartedOverRow.lineKey, "the key is in the catalog")
+    }
+
+    // MARK: - c: the old card
+
+    func testTheOldCardHasNoCallAndOffersDeleteChat() {
+        let caps = PersonInfoCapabilities(
+            membershipEnded: StartedOverCard.membershipEnded(chatEnded: false, keyStartedOver: true),
+            isContact: true, contactsOfContactsOn: false, isBlocked: false)
+        let sections = StartedOverCard.sections(personInfoSections(caps: caps), keyStartedOver: true, hasChat: true)
+        XCTAssertFalse(sections.contains(.call))
+        XCTAssertTrue(sections.contains(.message), "Message opens the closed history")
+        XCTAssertTrue(sections.contains(.safetyNumber))
+        XCTAssertTrue(sections.contains(.renameContact))
+        XCTAssertTrue(sections.contains(.block))
+        XCTAssertTrue(sections.contains(.removeContact))
+        XCTAssertTrue(sections.contains(.deleteChat))
+        XCTAssertFalse(
+            StartedOverCard.sections(personInfoSections(caps: caps), keyStartedOver: true, hasChat: false)
+                .contains(.deleteChat), "no one-to-one here, nothing to delete")
+        XCTAssertFalse(StartedOverCard.membershipEnded(chatEnded: false, keyStartedOver: false))
+        // The conversation header of the closed one-to-one has no call buttons.
+        XCTAssertFalse(ChatViewModel.hasSomeoneToCall(
+            peerDeleted: false, peerStartedOver: true, isGroup: false, people: 2))
+    }
+}
+
+/// A ``SessionPersistence`` that holds nothing, so building an
+/// ``AuthRepository`` here never reads or writes the real Keychain.
+private struct StartedOverNoSession: SessionPersistence {
+    func hasDeviceKey(accountIdB64: String) -> Bool { false }
+    func accountIdentitySeed(accountIdB64: String) -> Data? { nil }
+    func exportKey(accountIdB64: String) -> Data? { nil }
+    func sessionToken(accountIdB64: String) -> PersistedSessionToken? { nil }
+    func putSessionToken(_ token: PersistedSessionToken, accountIdB64: String) throws {}
+    func deleteSessionToken(accountIdB64: String) {}
 }

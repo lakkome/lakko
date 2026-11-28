@@ -222,6 +222,14 @@ public class ContactsRepository(
     private fun resetLedgerRows(): Map<String, ResetLedgerRow> =
         boundAccountB64?.let { resetLedgerStore.loadAll(it) }.orEmpty()
 
+    /** ADR-0073 R.5 - every key an accepted reset retired, standard base64. */
+    private fun retiredResetKeys(): Set<String> =
+        try {
+            supersededKeysOf(resetLedgerRows()).keys
+        } catch (_: Throwable) {
+            emptySet()
+        }
+
     /** The key [accountIdB64] is pinned under now, or `null`. */
     private fun pinnedKeyOf(accountIdB64: String): String? =
         try {
@@ -399,6 +407,10 @@ public class ContactsRepository(
                     accountIdB64 = peer,
                     retiredKeysB64 = event.retiredKeysB64 + event.previousKeyB64,
                     newKeyB64 = event.newKeyB64,
+                    // UX 16.11 - the row of an account that started over
+                    // stays under its old key: it is not the person who
+                    // reset now.
+                    startedOverKeysB64 = mutableStartedOverKeys.value,
                 )
                 changed = plan != null
                 if (plan == null) {
@@ -1446,9 +1458,15 @@ public class ContactsRepository(
         if (boundAccountB64 == null) return 0
         var added = 0
         var pendingChanged = false
+        // A row carried under a key an accepted reset retired here is the
+        // person's old key: their row is already under the new one.
+        val retired = retiredResetKeys()
         mutableState.update { state ->
             val known = state.accepted.map { it.request.fromPubkey.toList() }.toHashSet()
-            val fresh = incoming.filter { known.add(it.request.fromPubkey.toList()) }
+            val fresh = incoming.filter {
+                oneToOnePeerGetsRow(base64Encode(it.request.fromPubkey), retired) &&
+                    known.add(it.request.fromPubkey.toList())
+            }
             added = fresh.size
             if (fresh.isEmpty()) return@update state
             val accepted = state.accepted + fresh
@@ -1520,6 +1538,10 @@ public class ContactsRepository(
         // came back on the next load).
         val onePerson = provenSamePerson()
         if (removedContactKeys.any { onePerson(keyOfHex(it), signatureKey) }) return false
+        // A key an accepted reset retired is no longer the person: their row
+        // moved to the new key, and a one-to-one still held under the old one
+        // must not write it a second time.
+        if (!oneToOnePeerGetsRow(base64Encode(signatureKey), retiredResetKeys())) return false
         var changed = false
         var sentChanged = false
         mutableState.update { state ->
@@ -3140,6 +3162,15 @@ public class ContactsRepository(
                 username = capability.inviterUsername(),
                 label = capability.label(),
             )
+            // UX 16.11 - a contact row for this account under ANOTHER key:
+            // the identity check runs first, so an unsealed reset is recorded
+            // (the page is then the ordinary Add page for the new account)
+            // and a sealed or proven change is re-pinned (the row follows it).
+            val established = establishedContact(ownerAccountId)
+            if (established != null && !established.request.fromPubkey.contentEquals(opened.ownerSignaturePubkey)) {
+                checkContactIdentity(ownerAccountId)
+                if (!bound.isCurrent) return@use InviteOpenResult.RequiresReauth
+            }
             classifyOpenedInvite(opened)
         }
     }
@@ -3156,9 +3187,24 @@ public class ContactsRepository(
         val isOwn = ownAccountId != null && invite.ownerAccountId.contentEquals(ownAccountId)
         // ADR-0073 R.7 case 1 / UX 16.6 — "already a contact" is the pin or
         // a verified binding naming the row's own key.
-        val established = if (isOwn) null else establishedContact(invite.ownerAccountId)
+        // UX 16.11 - an account that started over is a new account under the
+        // same username: the old row (and a pending contact of the old
+        // account) counts for its own key only, so the new account's link is
+        // the ordinary Add page.
+        val inviteKeyB64 = base64Encode(invite.ownerSignaturePubkey)
+        val closedKeys = startedOverKeys.value
+        val startedOverNewKey = startedOverKeyOf(base64Encode(invite.ownerAccountId))
+        val counts: (String) -> Boolean = { rowKeyB64 ->
+            establishedRowCountsForKey(rowKeyB64, inviteKeyB64, closedKeys, startedOverNewKey)
+        }
+        val established = if (isOwn) {
+            null
+        } else {
+            establishedContact(invite.ownerAccountId)?.takeIf { counts(base64Encode(it.request.fromPubkey)) }
+        }
         val ownerHex = me.lakko.app.ds.hexOf(invite.ownerAccountId)
-        return when (invitePageKind(isOwn, established != null, pendingContact(ownerHex) != null)) {
+        val pending = pendingContact(ownerHex)?.takeIf { counts(it.signaturePubkeyB64) }
+        return when (invitePageKind(isOwn, established != null, pending != null)) {
             InvitePageKind.OWN -> InviteOpenResult.Own
             InvitePageKind.ALREADY -> {
                 val existing = established ?: return InviteOpenResult.Opened(invite)
@@ -3194,10 +3240,11 @@ public class ContactsRepository(
         val bound = sessionBinding.capture()
         // ADR-0016 rule 2 / ADR-0073 R.2 — the capability's inline bundle never
         // went through the fetch gate: the pin question is asked of it before
-        // anything is spent or sealed (an attested reset is accepted there).
+        // anything is spent or sealed (an attested reset is accepted there;
+        // UX 16.11: an account that started over is added as a new account).
         try {
             useClientWith(secrets) { client, _ ->
-                client.gateBundleRecipient(
+                client.gateInviteRecipient(
                     recipientAccountId = invite.ownerAccountId,
                     recipientSignaturePubkey = invite.ownerSignaturePubkey,
                 )
@@ -3473,6 +3520,10 @@ public class ContactsRepository(
             // reach manager was bound lost it, and every later pass failed
             // with no mailbox for the requester (seen on a Pixel 2026-11-10).
             inbox.add(UndecidedLinkRequest(req.copy(linkAnswer = null), answer.linkId, answer.linkSecret))
+            // UX 16.11 - a request from a started-over account's new keys
+            // that answers one of this account's links is decided as any
+            // stranger's through that link: no card, so no note either.
+            startedOverRequestIds.remove(req.messageId)
         }
         return out
     }
@@ -3865,6 +3916,16 @@ public class ContactsRepository(
                 }
                 sync.recordLinkUse(answer.linkId, request.fromPubkey)
             }
+        }
+        // UX 16.11 / ADR-0079 - a request from the new keys of an account
+        // that started over, through one of this account's live links, is
+        // accepted as any stranger's: a new contact and a new one-to-one with
+        // the new keys. Its key becomes the account's pin as on a manual
+        // Accept; the old row and its closed one-to-one are left as they are.
+        if (startedOverKeyOf(base64Encode(fromAccountId)) == base64Encode(request.fromPubkey) &&
+            !adoptStartedOverFor(request)
+        ) {
+            return false
         }
         return try {
             LinkClaims.runBuild(deps)

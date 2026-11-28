@@ -52,6 +52,11 @@ public final class ContactsViewModel: ObservableObject {
     /// app has not answered yet, mirrored from ``ContactsRepository/invited``.
     @Published public private(set) var invited: [PendingContact] = []
 
+    /// UX 16.11 — every key an unsealed reset left behind (standard base64):
+    /// a contact row under one reads "Started over with a new account" in
+    /// place of its `@username` (``StartedOverRow``).
+    @Published public private(set) var startedOverKeys: Set<String> = []
+
     /// The pending contacts the list shows: those not yet an accepted
     /// contact on this device.
     public var shownInvited: [PendingContact] {
@@ -159,6 +164,13 @@ public final class ContactsViewModel: ObservableObject {
             .removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { marks.check($0) }
+            .store(in: &cancellables)
+        self.startedOverKeys = Set(PeerPinStore().loadStartedOverKeys().keys)
+        NotificationCenter.default.publisher(for: StartedOverEvents.changed)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.startedOverKeys = Set(PeerPinStore().loadStartedOverKeys().keys)
+            }
             .store(in: &cancellables)
         self.invited = repository.invited
         repository.$invited

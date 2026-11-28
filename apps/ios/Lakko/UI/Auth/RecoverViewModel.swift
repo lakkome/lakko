@@ -51,12 +51,12 @@ public final class RecoverViewModel: ObservableObject {
     /// `nil` when the route is not offered here.
     @Published public private(set) var threeWordsAccount: SessionAccount?
 
-    /// The row above both groups.
-    public var topMethods: [Mode] { [.email] }
-
-    /// The list's two groups in display order.
+    /// The list's two groups in display order. The email code signs in only
+    /// (a mailed code gives a new password, never keys: the email vault is
+    /// gone, ADR-0075 amended 2026-11-26), so it is in the sign-in group,
+    /// after the authenticator code (2026-11-28).
     public var keysMethods: [Mode] { [.anotherDevice, .passkey, .phrase] }
-    public var signInMethods: [Mode] { threeWordsAccount == nil ? [.totp] : [.words, .totp] }
+    public var signInMethods: [Mode] { threeWordsAccount == nil ? [.totp, .email] : [.words, .totp, .email] }
 
     /// The catalog key of the note under the list: it names three words
     /// only where the row is offered, so it never promises an absent route.

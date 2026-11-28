@@ -1157,6 +1157,28 @@ public class ContactsClient(
         }
     }
 
+    /**
+     * [gateBundleRecipient] for an `/i/` link's inviter, with the one
+     * difference [gateForOutgoingRequest] makes for an add by @name (UX 16.11):
+     * an inviter whose account started over (an unsealed reset this device
+     * recorded) is a NEW account, and the person pressing Add on its link
+     * asked for exactly that account. Its key becomes the pin of a new
+     * contact ([adoptStartedOverAccount]) when it is exactly the key the
+     * reset attested; the old row and its closed one-to-one stay as they
+     * are. Every other refusal propagates.
+     */
+    public suspend fun gateInviteRecipient(
+        recipientAccountId: ByteArray,
+        recipientSignaturePubkey: ByteArray,
+    ) {
+        try {
+            gateBundleRecipient(recipientAccountId, recipientSignaturePubkey)
+        } catch (so: ContactStartedOver) {
+            adoptStartedOverAccount(base64Encode(recipientAccountId), base64Encode(recipientSignaturePubkey))
+                ?: throw so
+        }
+    }
+
     // -----------------------------------------------------------------
     // G-4 (ADR-0016): fetch-path supersession verify + re-pin
     // -----------------------------------------------------------------

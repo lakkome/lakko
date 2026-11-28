@@ -3339,7 +3339,8 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0045 UX §6.2.4 — `Delete this chat`.
     ///
     /// Reachable only once the membership has ended (the exit block's `ended`
-    /// arm), so this never removes a live conversation — and it re-checks that
+    /// arm), or for the closed one-to-one of a person who started over (UX
+    /// 16.11), so this never removes a live conversation — and it re-checks that
     /// here rather than trusting the control it was drawn behind, the same
     /// layered-defence posture `leaveGroupAffordance` and `exitBlock` already
     /// keep between them.
@@ -3361,7 +3362,13 @@ public final class ChatRepository: ObservableObject {
         // membership says nothing about whether the conversation is over.
         guard currentAccountIdB64 != nil, groups[groupIdHex] != nil else { return false }
         let headHex = headGroupIdHex(of: groupIdHex)
-        guard membershipEnded(membershipStateNow(groupIdHex: headHex)) else { return false }
+        // UX 16.11 (2026-11-28) — or the one-to-one with a person who
+        // started over: still an active group, deleted all the same (the MLS
+        // provider refuses to delete an active group and its state stays
+        // inert, ``removeGroupNow(groupIdHex:mls:)``).
+        guard StartedOverChat.deletable(
+            membershipEnded: membershipEnded(membershipStateNow(groupIdHex: headHex)),
+            peerStartedOver: isStartedOverOneToOne(groupIdHex: headHex)) else { return false }
         let plan = conversationPlan(ofGroup: groupIdHex)
         let segments = (plan?.heldSegments ?? [groupIdHex]).map {
             LineageViews.ConversationSegment(groupIdB64: $0, groupIdHex: $0)

@@ -35,6 +35,7 @@
  */
 import { accountSuspended } from "../auth/suspension-state";
 import {
+  createEffect,
   createMemo,
   createResource,
   createSignal,
@@ -54,6 +55,7 @@ import { establishedContactOfAccount, pinKeysOf } from "../contacts/known-contac
 import {
   accountKeysOf,
   loadAccepted,
+  readPin,
   restoreRemovedContact,
   subscribeAcceptedChanged,
 } from "../contacts/local-store";
@@ -181,11 +183,17 @@ export default function Invite(): JSX.Element {
   /** The visitor's contact row for the inviter, when they already are one:
    *  the pin or a verified binding naming the row's key, never a row whose
    *  account id came only from a peer's own profile. */
+  /** Keys the inviter's account left behind by an unsealed reset. */
+  const leftBehindKeysOf = (accountIdB64: string): readonly string[] =>
+    readPin(accountIdB64)?.startedOverKeysB64 ?? [];
   const existingContactKeyB64 = (cap: WasmInviteCapability): string | null => {
     const ownerAccountIdB64 = base64Encode(cap.ownerAccountId);
     const existing = establishedContactOfAccount(loadAccepted(), groupIdHex(cap.ownerAccountId), {
       pinKeysB64: pinKeysOf(accountKeysOf(ownerAccountIdB64)),
       bindingKeyB64: readVerifiedBinding(ownerAccountIdB64)?.keyB64 ?? null,
+      // UX 16.11 (walk of 2026-11-28): the row of an account that started
+      // over is not the account behind this link; the page offers Add.
+      leftBehindKeysB64: leftBehindKeysOf(ownerAccountIdB64),
     });
     return existing?.signaturePubkeyB64 ?? null;
   };
@@ -211,7 +219,32 @@ export default function Invite(): JSX.Element {
       signedIn: signedIn(),
       isOwn: own,
       existingContactKeyB64: signedIn() ? existingContactKeyB64(d.cap) : null,
-      pendingInviter: pendingContacts().some((p) => p.accountIdHex === ownerHex),
+      pendingInviter: pendingContacts().some(
+        (p) =>
+          p.accountIdHex === ownerHex &&
+          !leftBehindKeysOf(base64Encode(d.cap.ownerAccountId)).includes(p.signaturePubkeyB64),
+      ),
+    });
+  });
+
+  // UX 16.11 (walk of 2026-11-28): the link names the account under keys
+  // other than the contact row's. Whether that is the same person (a sealed
+  // reset, accepted silently by the check) or a new account under the same
+  // username (an unsealed reset, recorded by the check) is decided before
+  // the person picks anything: the check writes what it learns, the pin
+  // store notifies, and the page shows "already in your contacts" only for
+  // the same person and the ordinary Add page for a started-over account.
+  let checkedOwnerKeyB64: string | null = null;
+  createEffect(() => {
+    const v = view();
+    const d = invite();
+    if (v.kind !== "already" || d === null) return;
+    const ownerKeyB64 = base64Encode(d.cap.ownerSignaturePubkey);
+    if (v.contactKeyB64 === ownerKeyB64 || checkedOwnerKeyB64 === ownerKeyB64) return;
+    checkedOwnerKeyB64 = ownerKeyB64;
+    void client.checkContactIdentity(d.cap.ownerAccountId).catch(() => {
+      // Started over, refused, inconclusive or offline: the store holds what
+      // was learned; the page follows it.
     });
   });
 

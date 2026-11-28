@@ -19,10 +19,11 @@
  * is a normal chat: "old" is decided by the key the other person's leaves
  * are bound to, never by the account id.
  *
- * Pure: `routes/Chat.tsx`, `routes/Contacts.tsx` and
+ * Pure (apart from the catalog read of {@link contactRowSubLine}): `routes/Chat.tsx`, `routes/Contacts.tsx` and
  * `contacts/MailboxContext.tsx` gather the facts from the contacts store
  * (`loadStartedOverKeys`, `startedOverOf`) and act.
  */
+import { t } from "../l10n";
 import type { ConversationSurface } from "../people/deleted-surface";
 
 /** Which line stands in place of the composer of a closed one-to-one. */
@@ -133,4 +134,49 @@ export function withoutAddForStartedOver<T extends string>(
   keyLeftBehind: boolean,
 ): T[] {
   return keyLeftBehind ? sections.filter((s) => s !== "add-contact") : [...sections];
+}
+
+/**
+ * UX 16.11 (walk of 2026-11-28): the second line of a contact row in
+ * Contacts. After an unsealed reset and an accepted request there are two
+ * rows under one name: the account that started over (its key was left
+ * behind) and the new account. The old row's second line reads "Started
+ * over with a new account" (`contacts.started_over.row`) in place of the
+ * @username, which now belongs to the new account; every other row keeps
+ * the line it had (`null`: none).
+ */
+export function contactRowSubLine(username: string | null, startedOver: boolean): string | null {
+  return startedOver ? t("contacts.started_over.row") : username;
+}
+
+/**
+ * UX 16.11 (walk of 2026-11-28): the card of an account that started over
+ * is the card of a one-to-one that ended, whatever the MLS group says (no
+ * one ever removed this device from it, and nobody is left to): the shared
+ * rule (`personInfoSections` with `membershipEnded`) then offers no call,
+ * keeps Message (the closed history), the safety number, rename, block and
+ * remove. Pure.
+ */
+export function cardMembershipEnded(input: {
+  readonly chatEnded: boolean;
+  readonly keyLeftBehind: boolean;
+}): boolean {
+  return input.chatEnded || input.keyLeftBehind;
+}
+
+/**
+ * UX 16.11 (walk of 2026-11-28): whether the card offers `Delete chat` for
+ * the person's one-to-one, and whether pressing it deletes. Offered when a
+ * one-to-one is held and either its membership ended or its other person is
+ * a key an account left behind by an unsealed reset (the closed one-to-one
+ * of a contact who started over). The delete then drops every store and the
+ * row; the MLS group, which the core keeps while it is active, stays inert
+ * (`MembershipEndContext` `deleteConversation`). Pure.
+ */
+export function deleteChatOffered(input: {
+  readonly holdsOneToOne: boolean;
+  readonly chatEnded: boolean;
+  readonly peerKeyLeftBehind: boolean;
+}): boolean {
+  return input.holdsOneToOne && (input.chatEnded || input.peerKeyLeftBehind);
 }

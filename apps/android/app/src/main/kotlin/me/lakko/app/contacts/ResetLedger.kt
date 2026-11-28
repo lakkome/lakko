@@ -381,10 +381,18 @@ public fun rekeyContactRows(
     accountIdB64: String,
     retiredKeysB64: List<String>,
     newKeyB64: String,
+    /** UX 16.11 - keys of earlier selves of the account that started over
+     *  (an unsealed reset): their rows are a different account and are
+     *  never moved. */
+    startedOverKeysB64: Set<String> = emptySet(),
 ): ContactRekeyPlan? {
-    val rowIndex = rows.indexOfFirst { it.accountIdB64 == accountIdB64 && it.keyB64 != newKeyB64 }
+    val rowIndex = rows.indexOfFirst {
+        it.accountIdB64 == accountIdB64 && it.keyB64 != newKeyB64 && it.keyB64 !in startedOverKeysB64
+    }
         .takeIf { it >= 0 }
-        ?: rows.indexOfFirst { it.keyB64 in retiredKeysB64 && it.keyB64 != newKeyB64 }.takeIf { it >= 0 }
+        ?: rows.indexOfFirst {
+            it.keyB64 in retiredKeysB64 && it.keyB64 != newKeyB64 && it.keyB64 !in startedOverKeysB64
+        }.takeIf { it >= 0 }
         ?: return null
     val folded = rows.indices.filter { it != rowIndex && rows[it].keyB64 == newKeyB64 }.toSet()
     return ContactRekeyPlan(rowIndex, folded)

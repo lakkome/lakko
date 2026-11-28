@@ -193,19 +193,35 @@ export interface ContactAccountRow {
  * cannot hide the real one, and a pin written for the account's REAL key
  * (by this check or any earlier fetch) never certifies a claimed row: the
  * comparison is with the row's own key.
+ *
+ * UX 16.11 (walk of 2026-11-28): a row under a key the account LEFT BEHIND
+ * by an unsealed reset (`leftBehindKeysB64`, the pin's
+ * `startedOverKeysB64`) never establishes the account. That row is the
+ * started-over account; the keys the account publishes now are a new
+ * account under the same username, so its invite link shows the ordinary
+ * Add page and its request is not answered silently. Until the person
+ * accepts the new account the pin still names the old key, which is why the
+ * left-behind list, not the pin, decides.
  */
 export function establishedContactOfAccount<T extends ContactAccountRow>(
   accepted: readonly T[],
   accountIdHex: string | null | undefined,
-  verified: { readonly pinKeysB64: readonly string[]; readonly bindingKeyB64: string | null },
+  verified: {
+    readonly pinKeysB64: readonly string[];
+    readonly bindingKeyB64: string | null;
+    /** Keys the account left behind by an unsealed reset (UX 16.11). */
+    readonly leftBehindKeysB64?: readonly string[];
+  },
 ): T | undefined {
   if (accountIdHex === null || accountIdHex === undefined || accountIdHex.length === 0) return undefined;
   const wanted = accountIdHex.toLowerCase();
+  const leftBehind = verified.leftBehindKeysB64 ?? [];
   return accepted.find(
     (c) =>
       c.accountIdHex !== undefined &&
       c.accountIdHex.toLowerCase() === wanted &&
       c.signaturePubkeyB64.length > 0 &&
+      !leftBehind.includes(c.signaturePubkeyB64) &&
       (verified.pinKeysB64.includes(c.signaturePubkeyB64) ||
         c.signaturePubkeyB64 === verified.bindingKeyB64),
   );

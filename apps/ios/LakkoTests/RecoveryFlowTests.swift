@@ -1776,7 +1776,7 @@ final class RecoveryFlowTests: XCTestCase {
         let settled = await waitUntil { !model.busy && model.wordsRetired }
         XCTAssertTrue(settled)
         XCTAssertEqual(model.error, Localization.text("recovery.words.error.rejected"))
-        XCTAssertEqual(model.signInMethods, [.totp], "the row is gone")
+        XCTAssertEqual(model.signInMethods, [.totp, .email], "the row is gone")
         XCTAssertEqual(model.accessOnlyNoteKey, "recovery.access_only_note")
         XCTAssertEqual(budgets.load(accountIdB64: accountIdB64), .fresh)
         XCTAssertEqual(DevicePhrase.read(accountIdB64: accountIdB64), mnemonic.phrase(), "the phrase is kept")
@@ -2114,7 +2114,7 @@ final class RecoveryFlowTests: XCTestCase {
         var now: Int64 = 1_700_000_000_000
         let draws = [[7, 3, 12], [1, 2, 3], [4, 5, 6], [9, 8, 7], [10, 11, 12], [2, 4, 6]]
         let (model, budgets) = wordsModel(h, clock: { now }, draws: draws)
-        XCTAssertEqual(model.signInMethods, [.words, .totp])
+        XCTAssertEqual(model.signInMethods, [.words, .totp, .email])
         XCTAssertEqual(model.accessOnlyNoteKey, "recovery.access_only_note_words")
 
         model.mode = .words
@@ -2195,7 +2195,8 @@ final class RecoveryFlowTests: XCTestCase {
         let h = harness(marker: PersistedSession(accountIdB64: base64Encode(randomBytes(16)), username: "alice"))
         let model = RecoverViewModel(repository: h.repository, cachedUsername: "alice")
         XCTAssertEqual(model.keysMethods, [.anotherDevice, .passkey, .phrase])
-        XCTAssertEqual(model.signInMethods, [.totp])
+        XCTAssertEqual(model.signInMethods, [.totp, .email])
+        XCTAssertFalse(model.keysMethods.contains(.email), "a mailed code brings no chats back")
         XCTAssertEqual(model.accessOnlyNoteKey, "recovery.access_only_note")
     }
 

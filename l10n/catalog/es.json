@@ -8090,11 +8090,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "Un código de la app de autenticación inicia tu sesión. En un dispositivo que nunca ha tenido esta cuenta, después todavía necesitas otro dispositivo, una llave de acceso o tu frase de recuperación.",
+      "text": "Estos métodos inician tu sesión. En un dispositivo que nunca ha tenido esta cuenta, después todavía necesitas otro dispositivo, una llave de acceso o tu frase de recuperación.",
       "status": "machine"
     },
     "recovery.access_only_note_words": {
-      "text": "Tres palabras o un código de la app de autenticación inician tu sesión. En un dispositivo que nunca ha tenido esta cuenta necesitas otro dispositivo, una llave de acceso o tu frase de recuperación.",
+      "text": "Estos métodos inician tu sesión. En un dispositivo que nunca ha tenido esta cuenta, después todavía necesitas otro dispositivo, una llave de acceso o tu frase de recuperación.",
       "status": "machine"
     },
     "recovery.cached_account": {

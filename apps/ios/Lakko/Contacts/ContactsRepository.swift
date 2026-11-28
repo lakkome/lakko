@@ -1646,6 +1646,7 @@ public final class ContactsRepository: ObservableObject {
                 rows.append(row)
             }
         }
+        rows = foldingRetiredKeyRows(rows)
         var left: [IncomingContactRequest] = []
         for request in pending {
             let stillAsking = request.asksForChatHere
@@ -1657,6 +1658,48 @@ public final class ContactsRepository: ObservableObject {
             }
         }
         return (rows, left)
+    }
+
+    /// Defect b (2026-11-28) — a row under a key that another row lists as
+    /// one of its own keys of before (a sealed reset re-keyed that row) is
+    /// the same person: it folds into the row that lists it, which keeps its
+    /// own key, request, link and rename. One person, one row. A row of an
+    /// account that started over (an unsealed reset) is never anyone's alias,
+    /// so it stays. Pure.
+    nonisolated static func foldingRetiredKeyRows(_ accepted: [AcceptedContact]) -> [AcceptedContact] {
+        var rows = accepted
+        var i = 0
+        while i < rows.count {
+            let retired = rows[i]
+            guard let into = rows.indices.first(where: { j in
+                j != i && rows[j].request.fromPubkey != retired.request.fromPubkey
+                    && rows[j].answersToAlias(retired.request.fromPubkey)
+                    && !retired.answersToAlias(rows[j].request.fromPubkey)
+            }) else {
+                i += 1
+                continue
+            }
+            let current = rows[into]
+            var previous = (current.previousKeysB64 ?? []) + (retired.previousKeysB64 ?? [])
+                + [base64Encode(retired.request.fromPubkey)]
+            var seen: Set<String> = [base64Encode(current.request.fromPubkey)]
+            previous = previous.filter { seen.insert($0).inserted }
+            rows[into] = AcceptedContact(
+                request: IncomingContactRequest(
+                    messageId: current.request.messageId,
+                    fromPubkey: current.request.fromPubkey,
+                    fromAccountId: current.request.fromAccountId ?? retired.request.fromAccountId,
+                    fromPseudonym: current.request.fromPseudonym,
+                    validAfterMs: current.request.validAfterMs,
+                    intro: current.request.intro,
+                    profile: current.request.profile,
+                    createdAt: current.request.createdAt),
+                groupIdHex: current.groupIdHex,
+                displayName: current.displayName ?? retired.displayName,
+                previousKeysB64: previous.isEmpty ? nil : previous)
+            rows.remove(at: i)
+        }
+        return rows
     }
 
     /// The accepted list with `request` accepted: one more row, or, when the
@@ -1725,6 +1768,16 @@ public final class ContactsRepository: ObservableObject {
         samePerson: (Data, Data) -> Bool = { $0 == $1 },
         keepsLink: (String) -> Bool = { _ in true }
     ) -> [AcceptedContact]? {
+        // Defect b (2026-11-28) — after a sealed reset the person's row is
+        // re-keyed and the key of before is one of its aliases, while the
+        // one-to-one held with that key still names it: that is the same
+        // row. A reset is no proven rotation, so `samePerson` cannot see it;
+        // without this the old one-to-one minted a second row of one person.
+        // Nothing is linked or written for it.
+        if !accepted.contains(where: { samePerson($0.request.fromPubkey, signatureKey) }),
+           accepted.contains(where: { $0.answersToAlias(signatureKey) }) {
+            return nil
+        }
         if let idx = accepted.firstIndex(where: { samePerson($0.request.fromPubkey, signatureKey) }) {
             let old = accepted[idx]
             // A person met after a rotation (ADR-0074 section 3.7): the row
@@ -1851,22 +1904,7 @@ public final class ContactsRepository: ObservableObject {
             declineContactRequest(messageId: request.messageId)
             return .deletedAccount
         }
-        // UX 16.11 — accepting a request from the new keys of an account
-        // that started over takes those keys as the account's, the way a
-        // first pin would: the person decided, here, that it is them. The
-        // one-to-one with the old keys stays closed; nothing is moved.
-        if let accountId = request.fromAccountId {
-            let pins = PeerPinStore()
-            let accountIdB64 = base64Encode(accountId)
-            let requestKeyB64 = base64Encode(request.fromPubkey)
-            if StartedOverRequest.adoptsNewKeys(
-                requestKeyB64: requestKeyB64,
-                pendingNewKeyB64: pins.startedOver(accountIdB64: accountIdB64)?.newKeyB64) {
-                pins.adoptStartedOver(
-                    accountIdB64: accountIdB64, newKeyB64: requestKeyB64,
-                    nowMs: Int64(Date().timeIntervalSince1970 * 1000))
-            }
-        }
+        adoptStartedOverKeys(of: request)
         return await ContactAccept.run(request: request, ports: ContactAccept.Ports(
             found: { [weak self] request, accountId in
                 guard let chat = self?.chatRepository else { throw ContactAccept.Unavailable() }
@@ -1882,6 +1920,27 @@ public final class ContactsRepository: ObservableObject {
             ack: { [weak self] request in
                 _ = try await self?.sendContactAck(request: request)
             }))
+    }
+
+    /// UX 16.11 — accepting a request from the new keys of an account that
+    /// started over (by Accept on its card, or through one of this account's
+    /// invite links) takes those keys as the account's, the way a first pin
+    /// would: the person decided, here, that it is them. The one-to-one with
+    /// the old keys stays closed and its contact row stays as it is; nothing
+    /// is moved. Nothing happens for any other request.
+    func adoptStartedOverKeys(of request: IncomingContactRequest) {
+        guard let accountId = request.fromAccountId else { return }
+        let pins = PeerPinStore()
+        let accountIdB64 = base64Encode(accountId)
+        let requestKeyB64 = base64Encode(request.fromPubkey)
+        guard StartedOverRequest.adoptsNewKeys(
+            requestKeyB64: requestKeyB64,
+            pendingNewKeyB64: pins.startedOver(accountIdB64: accountIdB64)?.newKeyB64) else { return }
+        if pins.adoptStartedOver(
+            accountIdB64: accountIdB64, newKeyB64: requestKeyB64,
+            nowMs: Int64(Date().timeIntervalSince1970 * 1000)) {
+            StartedOverEvents.notify(accountIdB64: accountIdB64)
+        }
     }
 
     /// The Welcome of an accept landed late: its ack goes out now. A request
@@ -2211,9 +2270,16 @@ public final class ContactsRepository: ObservableObject {
     /// verified binding naming the row's own key: a row whose account id came
     /// only from the peer's own profile establishes nothing, so a member who
     /// claimed this account's id cannot make its request vanish.
-    func establishedContact(ofAccountId accountId: Data) -> AcceptedContact? {
+    ///
+    /// `presentedKey` is the key in front of this device (the key a request
+    /// was signed with, the key an invite link names). ADR-0101 section 11 /
+    /// UX 16.11: a row under a key an unsealed reset left behind counts only
+    /// for that key, so the account's NEW key is a stranger's until the
+    /// person accepts it as a new contact.
+    func establishedContact(ofAccountId accountId: Data, presentedKey: Data?) -> AcceptedContact? {
         let accountIdB64 = base64Encode(accountId)
-        let pin = PeerPinStore().readPin(accountIdB64: accountIdB64)
+        let pins = PeerPinStore()
+        let pin = pins.readPin(accountIdB64: accountIdB64)
         let pinKeys = KnownContactRequest.pinKeys(of: pin.map {
             KnownContactRequest.PinKeys(
                 currentKeyB64: $0.pinnedSignaturePubkeyB64,
@@ -2226,6 +2292,8 @@ public final class ContactsRepository: ObservableObject {
             verified: KnownContactRequest.Verified(
                 pinKeysB64: pinKeys,
                 bindingKeyB64: VerifiedBindingStore().read(accountIdB64: accountIdB64)?.keyB64),
+            presentedKeyB64: presentedKey.map(base64Encode),
+            startedOverKeysB64: Set(pins.loadStartedOverKeys().keys),
             row: { contact in
                 KnownContactRequest.ContactRow(
                     signaturePubkeyB64: base64Encode(contact.request.fromPubkey),
@@ -2268,8 +2336,20 @@ public final class ContactsRepository: ObservableObject {
         guard let accountIdB64 = boundAccountIdB64, let fromAccountId = request.fromAccountId else {
             return false
         }
+        // UX 16.11 — a request from the NEW keys of an account whose
+        // unsealed reset this device already recorded is the new account's:
+        // an ordinary request card with the note. Never answered silently,
+        // never merged into the old contact (which counts only for its own
+        // key, ``establishedContact(ofAccountId:presentedKey:)``).
+        if StartedOverRequest.isFromNewKeys(
+            requestKeyB64: base64Encode(request.fromPubkey),
+            newKeyB64: PeerPinStore().startedOver(accountIdB64: base64Encode(fromAccountId))?.newKeyB64 ?? "") {
+            startedOverIds.insert(request.messageId)
+            KnownRequestWaitingStore().drop(messageId: request.messageId, accountIdB64: accountIdB64)
+            return false
+        }
         // Read BEFORE the check below, which may write a first pin.
-        guard establishedContact(ofAccountId: fromAccountId) != nil
+        guard establishedContact(ofAccountId: fromAccountId, presentedKey: request.fromPubkey) != nil
             || KnownContactRequest.isContactKey(
                 base64Encode(request.fromPubkey),
                 in: state.accepted.map { base64Encode($0.request.fromPubkey) })
@@ -2316,7 +2396,7 @@ public final class ContactsRepository: ObservableObject {
             holdsOneToOne: holdsOneToOne,
             predatesContact: KnownContactRequest.requestPredatesContact(
                 requestCreatedAt: request.createdAt,
-                contactSince: (establishedContact(ofAccountId: fromAccountId)
+                contactSince: (establishedContact(ofAccountId: fromAccountId, presentedKey: request.fromPubkey)
                     ?? state.accepted.first { $0.request.fromPubkey == request.fromPubkey })?
                     .request.createdAt),
             siblingMayAdmit: KnownContactRequest.siblingMayAdmit(
@@ -2390,7 +2470,8 @@ public final class ContactsRepository: ObservableObject {
             accepted: state.accepted,
             accountIdB64: event.accountIdB64,
             previousKeyB64: event.previousKeyB64,
-            newKey: newKey)
+            newKey: newKey,
+            startedOverKeysB64: Set(PeerPinStore().loadStartedOverKeys().keys))
         guard next != state.accepted else { return }
         state = state.with(accepted: next)
     }
@@ -3065,7 +3146,26 @@ public final class ContactsRepository: ObservableObject {
             username: capability.inviterUsername(),
             label: capability.label(),
             bootstrapReferral: capability.bootstrapReferral())
+        // UX 16.11 — the link names keys this device does not hold for an
+        // account it pins: the identity check runs first, so an unsealed
+        // reset not yet seen here is recorded before the page decides (it
+        // decides "Add", not "already in your contacts"). The outcome itself
+        // is not used: the decision reads the stores the check wrote.
+        let pinned = PeerPinStore().readPin(accountIdB64: base64Encode(ownerAccountId))?.pinnedSignaturePubkeyB64
+        if let pinned, pinned != base64Encode(opened.ownerSignaturePubkey) {
+            _ = try? await clientFactory().checkContactIdentity(accountId: ownerAccountId)
+            guard bound.isCurrent else { return .requiresReauth }
+        }
         return inviteOpenResult(for: opened)
+    }
+
+    /// A pending contact is the inviter of a link only under the link's own
+    /// key: one recorded for keys an account has since left (an unsealed
+    /// reset, UX 16.11) is another account's.
+    nonisolated static func pendingIsInviter(
+        _ contact: PendingContact, accountIdHex: String, signatureKey: Data
+    ) -> Bool {
+        contact.accountIdHex == accountIdHex && contact.signaturePubkey == signatureKey
     }
 
     /// The ledger row of an `/i/` link opened under its fragment's secret.
@@ -3136,12 +3236,17 @@ public final class ContactsRepository: ObservableObject {
         guard let secrets = authRepository.identitySecrets else { return .requiresReauth }
         // ADR-0073 R.7 case 1 / UX 16.6 — "already a contact" is the pin or a
         // verified binding naming the row's key.
-        let established = establishedContact(ofAccountId: opened.ownerAccountId)
+        // UX 16.11 — an old row of an account that started over counts only
+        // for its own key: the new account's link is an ordinary Add page.
+        let established = establishedContact(
+            ofAccountId: opened.ownerAccountId, presentedKey: opened.ownerSignaturePubkey)
         let ownerHex = groupIdHex(opened.ownerAccountId)
         let decision = InvitePageDecision.decide(
             isOwn: opened.ownerAccountId == secrets.accountId,
             established: established != nil,
-            pending: invited.contains { $0.accountIdHex == ownerHex })
+            pending: invited.contains {
+                Self.pendingIsInviter($0, accountIdHex: ownerHex, signatureKey: opened.ownerSignaturePubkey)
+            })
         switch decision {
         case .own:
             return .own
@@ -3175,8 +3280,11 @@ public final class ContactsRepository: ObservableObject {
         // The link carries its owner's keys and this flow never fetches the
         // bundle: the same pin question is asked of them before anything is
         // spent or sealed (an attested reset is accepted there, silently).
+        // UX 16.11 — the link of an account that started over names its NEW
+        // keys: Add takes them as the new account's (the old contact and its
+        // closed one-to-one stay as they are).
         do {
-            try await clientFactory().refuseContactRequestToUnverifiedKeys(
+            try await clientFactory().refuseContactRequestToUnverifiedKeysForAdd(
                 accountId: invite.ownerAccountId, recipientSignaturePubkey: invite.ownerSignaturePubkey)
         } catch {
             return .failed(message: "the link's keys are not the ones trusted for this account")
@@ -3404,8 +3512,12 @@ public final class ContactsRepository: ObservableObject {
         return await LinkClaims.runBuild(LinkClaims.BuildDeps(
             founded: { claims.own(key)?.founded },
             note: { claims.note(key) },
-            prepare: {
-                try await chatRepository.prepareLinkOneToOne(
+            prepare: { [weak self] in
+                // UX 16.11 — a request through this account's link from the
+                // new keys of an account that started over is a new contact:
+                // its keys are taken before the identity gate of the founding.
+                self?.adoptStartedOverKeys(of: request)
+                return try await chatRepository.prepareLinkOneToOne(
                     recipientAccountId: fromAccountId, recipientSignaturePubkey: request.fromPubkey)
             },
             record: { claims.setFounded(key, $0) },
@@ -4013,6 +4125,12 @@ public struct AcceptedContact: Equatable, Codable {
     /// This contact re-keyed to `key` after an accepted reset: the rename,
     /// the account id, the chat link and the row id stay with the person, and
     /// the key it held is appended to the display aliases.
+    /// Whether `key` is one of this row's keys of before (an alias kept when
+    /// a sealed reset or a proven rotation re-keyed it), not its own key.
+    func answersToAlias(_ key: Data) -> Bool {
+        request.fromPubkey != key && (previousKeysB64?.contains(base64Encode(key)) ?? false)
+    }
+
     func withSignatureKey(_ key: Data) -> AcceptedContact {
         var previous = previousKeysB64 ?? []
         let held = base64Encode(request.fromPubkey)
@@ -4221,15 +4339,23 @@ public enum ContactRekey {
     /// | yes, already under the new key                           | -                       | unchanged                                |
     /// | yes                                                      | none                    | that row re-keyed, the old key an alias  |
     /// | yes                                                      | another row             | re-keyed, and the other row is dropped   |
+    ///
+    /// The row is the one under the previous key; only when none is, the row
+    /// naming the account. A row under a key an UNSEALED reset left behind
+    /// (`startedOverKeysB64`, UX 16.11) is the old account and is never the
+    /// one re-keyed by a later reset of the new one.
     public static func afterReset(
         accepted: [AcceptedContact],
         accountIdB64: String,
         previousKeyB64: String,
-        newKey: Data
+        newKey: Data,
+        startedOverKeysB64: Set<String> = []
     ) -> [AcceptedContact] {
-        guard let idx = accepted.firstIndex(where: {
-            $0.accountIdB64 == accountIdB64 || base64Encode($0.request.fromPubkey) == previousKeyB64
-        }) else { return accepted }
+        guard let idx = accepted.firstIndex(where: { base64Encode($0.request.fromPubkey) == previousKeyB64 })
+            ?? accepted.firstIndex(where: {
+                $0.accountIdB64 == accountIdB64
+                    && !startedOverKeysB64.contains(base64Encode($0.request.fromPubkey))
+            }) else { return accepted }
         if accepted[idx].request.fromPubkey == newKey { return accepted }
         let rekeyed = accepted[idx].withSignatureKey(newKey)
         var out: [AcceptedContact] = []

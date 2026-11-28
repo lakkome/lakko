@@ -200,7 +200,9 @@ public fun ContactsScreen(
         PendingContacts.shown(invitedAll, accepted.mapTo(HashSet()) { base64Encode(it.request.fromPubkey) })
     }
     val unnamed = t("invite.contact.page.unnamed")
-    val sections = remember(accepted, invited, nameVersion, query, unnamed) {
+    // UX 16.11 - rows of accounts that started over read so under the name.
+    val startedOverKeys by viewModel.startedOverKeys.collectAsStateWithLifecycle()
+    val sections = remember(accepted, invited, nameVersion, query, unnamed, startedOverKeys) {
         val rows = accepted.map { c ->
             val resolved = directory.resolve(c.request.fromPubkey)
             ContactRowModel(
@@ -208,6 +210,7 @@ public fun ContactsScreen(
                 name = resolved.primary,
                 username = resolved.verifiedUsername,
                 placeholder = resolved.isPlaceholder,
+                startedOver = base64Encode(c.request.fromPubkey) in startedOverKeys,
             )
         } + invited.map { p ->
             // ADR-0098 — a pending contact whose account was deleted is
@@ -568,12 +571,18 @@ private fun ContactRow(row: ContactRowModel, onClick: () -> Unit) {
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(row.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-            row.username?.takeIf { row.name != "@$it" }?.let { user ->
-                Text(
-                    "@$user",
+            when (val line = contactRowSecondLine(row)) {
+                is ContactRowSecondLine.Username -> Text(
+                    "@${line.username}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                ContactRowSecondLine.StartedOver -> Text(
+                    t("contacts.started_over.row"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                null -> Unit
             }
         }
     }

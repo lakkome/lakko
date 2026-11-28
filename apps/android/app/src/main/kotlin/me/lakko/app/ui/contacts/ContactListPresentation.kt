@@ -24,7 +24,31 @@ public data class ContactRowModel(
     /** ADR-0084 — the person's signature key in either base64 spelling, for
      *  rows whose [key] is not one (an invited contact); `null` = [key]. */
     val personKey: String? = null,
+    /** UX 16.11 - the row's key belongs to an account that started over
+     *  (an unsealed reset): its second line says so instead of the
+     *  @username ([contactRowSecondLine]). */
+    val startedOver: Boolean = false,
 )
+
+/** What a Contacts row shows under the name. */
+public sealed interface ContactRowSecondLine {
+    /** `@username`. */
+    public data class Username(val username: String) : ContactRowSecondLine
+
+    /** `contacts.started_over.row`: "Started over with a new account". */
+    public data object StartedOver : ContactRowSecondLine
+}
+
+/**
+ * The second line of a Contacts row: for the row of an account that started
+ * over (UX 16.11), the started-over line in place of the @username, so the
+ * old account and the person's new account are told apart; else the
+ * @username when it adds something to the name; else nothing.
+ */
+public fun contactRowSecondLine(row: ContactRowModel): ContactRowSecondLine? = when {
+    row.startedOver -> ContactRowSecondLine.StartedOver
+    else -> row.username?.takeIf { row.name != "@$it" }?.let { ContactRowSecondLine.Username(it) }
+}
 
 /** A letter section of the alphabetical list: the header and its rows. */
 public data class ContactSection(val letter: String, val rows: List<ContactRowModel>)
@@ -280,3 +304,12 @@ public fun withoutAddForStartedOver(
     keyStartedOver: Boolean,
 ): List<uniffi.lakko_ffi_uniffi.InfoSection> =
     if (keyStartedOver) sections.filter { it != uniffi.lakko_ffi_uniffi.InfoSection.ADD_CONTACT } else sections
+
+/**
+ * UX 16.11 - the card of a key whose account started over is the card of a
+ * closed one-to-one: `membershipEnded` for the shared rule
+ * (`personInfoSections`), which removes Call and adds Delete chat while
+ * Message (the closed history), Safety number, rename, block and remove stay.
+ */
+public fun personCardMembershipEnded(membershipEnded: Boolean, keyStartedOver: Boolean): Boolean =
+    membershipEnded || keyStartedOver

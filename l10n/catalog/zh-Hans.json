@@ -8090,11 +8090,11 @@
       "status": "machine"
     },
     "recovery.access_only_note": {
-      "text": "身份验证器验证码可让你登录。在从未保存过此账号的设备上，之后你仍需要另一台设备、通行密钥或恢复短语。",
+      "text": "以上方式可让你登录。在从未保存过此账号的设备上，之后你仍需要另一台设备、通行密钥或恢复短语。",
       "status": "machine"
     },
     "recovery.access_only_note_words": {
-      "text": "三个词或身份验证器验证码可让你登录。在从未保存过此账号的设备上，你需要另一台设备、通行密钥或恢复短语。",
+      "text": "以上方式可让你登录。在从未保存过此账号的设备上，之后你仍需要另一台设备、通行密钥或恢复短语。",
       "status": "machine"
     },
     "recovery.cached_account": {

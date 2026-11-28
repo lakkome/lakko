@@ -82,7 +82,12 @@ import {
   upsertAccepted,
   type AcceptedContact,
 } from "../contacts/local-store";
-import { requestCarriesStartedOverNote, sentRequestCarriesStartedOverNote } from "../contacts/started-over";
+import {
+  cardMembershipEnded,
+  deleteChatOffered,
+  requestCarriesStartedOverNote,
+  sentRequestCarriesStartedOverNote,
+} from "../contacts/started-over";
 import { useMailbox } from "../contacts/MailboxContext";
 import {
   forgetSentRequest,
@@ -738,6 +743,12 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
             leftBehindKeysB64: accountIdB64 === null ? [] : (readPin(accountIdB64)?.startedOverKeysB64 ?? []),
           });
         }}
+        startedOverRow={(c) => {
+          // UX 16.11 (walk of 2026-11-28): the row of an account that
+          // started over reads so in place of its @username.
+          accepted();
+          return loadStartedOverKeys().has(c.signaturePubkeyB64);
+        }}
         onDecline={onDecline}
         sent={sent}
         onDismissSent={onDismissSent}
@@ -807,7 +818,16 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
               // again whenever the selection or the registry changes; it is
               // terminal, so a stale `false` lasts only until the card is
               // next opened.
-              membershipEnded={chatMembershipEnded(c())}
+              // UX 16.11 (walk of 2026-11-28): the card of an account that
+              // started over offers no call (its devices are gone), exactly
+              // as for a one-to-one that ended.
+              membershipEnded={cardMembershipEnded({
+                chatEnded: chatMembershipEnded(c()),
+                keyLeftBehind: (() => {
+                  accepted();
+                  return loadStartedOverKeys().has(c().signaturePubkeyB64);
+                })(),
+              })}
               isContact={selectedIsContact()}
               keyLeftBehind={(() => {
                 accepted();
@@ -815,8 +835,19 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
               })()}
               accountIdHex={c().accountIdHex ?? null}
               onAddContact={() => onAddBack(c())}
+              // UX 16.11 (walk of 2026-11-28): also the closed one-to-one of
+              // a contact who started over, which the core keeps active.
               onDeleteChat={
-                chatMembershipEnded(c()) ? () => void onDeleteChat(c()) : null
+                deleteChatOffered({
+                  holdsOneToOne: groupWith(c()) !== undefined,
+                  chatEnded: chatMembershipEnded(c()),
+                  peerKeyLeftBehind: (() => {
+                    accepted();
+                    return loadStartedOverKeys().has(c().signaturePubkeyB64);
+                  })(),
+                })
+                  ? () => void onDeleteChat(c())
+                  : null
               }
               conversationId={chatMembershipEnded(c()) ? null : (groupWith(c())?.groupIdB64 ?? null)}
             />

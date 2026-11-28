@@ -40,6 +40,7 @@ import { blockPerson, confirmBlock } from "../moderation/block-actions";
 import { openReport } from "../moderation/report-session";
 import { CONVERSATION_CONTACT_REQUEST } from "../moderation/report-model";
 import { pendingNameOf, type PendingContact } from "./pending-contacts";
+import { contactRowSubLine } from "./started-over";
 import { MenuBackdrop } from "../ui/MenuBackdrop";
 
 /** What the add menu offers. Web has no contact QR flow, so there is no
@@ -89,6 +90,10 @@ export interface ContactListPaneProps {
    *  line under the name says the device could not confirm it is the same
    *  person. */
   readonly startedOverNote?: (request: IncomingContactRequest) => boolean;
+  /** UX 16.11 (walk of 2026-11-28): this contact row is the account that
+   *  started over (its key was left behind by an unsealed reset); its second
+   *  line says so in place of the @username (`contactRowSubLine`). */
+  readonly startedOverRow?: (contact: AcceptedContact) => boolean;
   /** UX 16.11, item D: a sent request to someone who started over carries
    *  the same note as an incoming one. */
   readonly sentStartedOverNote?: (record: SentRequestRecord) => boolean;
@@ -150,7 +155,12 @@ export function ContactListPane(props: ContactListPaneProps): JSX.Element {
       : (pendingNameOf(p) ?? t("invite.contact.page.unnamed"));
   const rows = (): ListRow[] => [
     ...props.contacts().map(
-      (c): ListRow => ({ kind: "contact", c, name: nameOf(c), username: usernameOf(c) }),
+      (c): ListRow => ({
+        kind: "contact",
+        c,
+        name: nameOf(c),
+        username: contactRowSubLine(usernameOf(c), props.startedOverRow?.(c) === true),
+      }),
     ),
     ...props.invited().map(
       (p): ListRow => ({

@@ -19,68 +19,75 @@ import { t } from "../../l10n";
 const BANNED = /OPAQUE|PAKE|OPRF|MLS|KeyPackage|epoch|pseudonym|sprint|\b1\.\d+[a-z]?\b/i;
 
 describe("the recovery method rows", () => {
-  it("list the email code first, then another device, passkey and phrase, then the sign-in-only routes", () => {
+  it("list another device, passkey and phrase, then the sign-in-only routes ending with the email code", () => {
     expect(RECOVER_METHODS.map((m) => m.id)).toEqual([
-      "email",
       "device",
       "passkey",
       "phrase",
       "words",
       "totp",
+      "email",
     ]);
   });
 
-  it("are grouped: the email code above both, what brings back the chats, then what only signs in", () => {
+  it("are grouped: what brings back the chats, then what only signs in, the email code included", () => {
     expect(RECOVER_METHOD_GROUPS.map((g) => [g.id, g.methods.map((m) => m.id)])).toEqual([
-      ["email", ["email"]],
       ["keys", ["device", "passkey", "phrase"]],
-      ["signin", ["words", "totp"]],
+      ["signin", ["words", "totp", "email"]],
     ]);
-    // The email row is in neither group and has no heading: what it brings
-    // depends on the account, and nothing may say which (UX 19.3).
+    // Every group has a heading, so no row sits headless above "Brings back
+    // your chats" (the 2026-11-28 walk read the email code as bringing chats).
     expect(RECOVER_METHOD_GROUPS.map((g) => g.label)).toEqual([
-      "",
       "Brings back your chats",
       "Logs you in on this device",
     ]);
+    const keys = RECOVER_METHOD_GROUPS.find((g) => g.id === "keys");
+    expect(keys?.methods.some((m) => m.id === "email")).toBe(false);
   });
 
   it("list three words only on a device that can check them itself", () => {
     const ids = (threeWords: boolean): string[] =>
       recoverMethodGroups({ threeWords }).flatMap((g) => g.methods.map((m) => m.id));
-    expect(ids(true)).toEqual(["email", "device", "passkey", "phrase", "words", "totp"]);
+    expect(ids(true)).toEqual(["device", "passkey", "phrase", "words", "totp", "email"]);
     // Absent, not greyed: the row is simply not there.
-    expect(ids(false)).toEqual(["email", "device", "passkey", "phrase", "totp"]);
-    // The email row and the first group never depend on the device.
-    for (const i of [0, 1]) {
-      expect(recoverMethodGroups({ threeWords: false })[i]).toBe(
-        recoverMethodGroups({ threeWords: true })[i],
-      );
+    expect(ids(false)).toEqual(["device", "passkey", "phrase", "totp", "email"]);
+    // The keys group never depends on the device.
+    expect(recoverMethodGroups({ threeWords: false })[0]).toBe(
+      recoverMethodGroups({ threeWords: true })[0],
+    );
+  });
+
+  it("say in the note what the sign-in group does, never naming a way that may be absent", () => {
+    expect(accessOnlyNoteKey({ threeWords: true })).toBe("recovery.access_only_note_words");
+    expect(accessOnlyNoteKey({ threeWords: false })).toBe("recovery.access_only_note");
+    // 2026-11-28: the note speaks of the whole sign-in group (the email code
+    // is in it now), so it names no single way and never promises three words.
+    for (const threeWords of [true, false]) {
+      const note = t(accessOnlyNoteKey({ threeWords }));
+      expect(note).toMatch(/^These log you in\./);
+      expect(note).not.toMatch(/three words|authenticator/i);
     }
   });
 
-  it("promise three words in the note only where the row is", () => {
-    expect(accessOnlyNoteKey({ threeWords: true })).toBe("recovery.access_only_note_words");
-    expect(accessOnlyNoteKey({ threeWords: false })).toBe("recovery.access_only_note");
-    expect(t(accessOnlyNoteKey({ threeWords: true }))).toMatch(/^Three words or an authenticator code/);
-    expect(t(accessOnlyNoteKey({ threeWords: false }))).not.toMatch(/three words/i);
-  });
-
-  it("mark exactly three words and the authenticator as sign-in only", () => {
+  it("mark exactly three words, the authenticator and the email code as sign-in only", () => {
     expect(RECOVER_METHODS.filter((m) => isSignInOnly(m.id)).map((m) => m.id)).toEqual([
       "words",
       "totp",
+      "email",
     ]);
     const signin = RECOVER_METHOD_GROUPS.find((g) => g.id === "signin");
     expect(signin?.methods.every((m) => isSignInOnly(m.id))).toBe(true);
   });
 
-  it("put the email code first, always, whatever the device or the account", () => {
-    expect(RECOVER_METHODS[0]?.id).toBe("email");
-    expect(RECOVER_METHODS[0]?.title).toBe("Email code");
-    expect(RECOVER_METHODS[0]?.sub).toBe("A code sent to your recovery email.");
-    // It is not one of the routes that only sign in.
-    expect(isSignInOnly("email")).toBe(false);
+  it("put the email code last in the sign-in group, whatever the device", () => {
+    for (const threeWords of [true, false]) {
+      const signin = recoverMethodGroups({ threeWords }).find((g) => g.id === "signin");
+      const last = signin?.methods[signin.methods.length - 1];
+      expect(last?.id).toBe("email");
+      expect(last?.title).toBe("Email code");
+      expect(last?.sub).toBe("A code sent to your recovery email.");
+    }
+    expect(isSignInOnly("email")).toBe(true);
   });
 
   it("say 'if you have one' on the first row of the keys group", () => {
